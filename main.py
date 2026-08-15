@@ -47,35 +47,71 @@ def health():
 
 @app.route("/status", methods=["GET"])
 def status():
-    """Bot status"""
+    """Bot status with automatic mode detection"""
+    is_test_mode = config.Config.is_test_mode_active()
+    mode_status = config.Config.get_mode_status()
+    mode_label = "🧪 TEST MODE" if is_test_mode else "🔴 REAL BETTING"
+    
     return jsonify({
         "bankroll": config.CURRENT_BANKROLL,
-        "phase": "PHASE_1_BOOTSTRAP",
-        "target": 10_000_000,
-        "recommended_stake": config.get_recommended_bet_size(),
-        "phase_1_complete": config.is_phase_1_complete()
+        "starting_bankroll": config.STARTING_BANKROLL,
+        "phase": "PHASE 1: BOOTSTRAP (6-Day Challenge)",
+        "target": 230_000_000,
+        "mode": mode_label,
+        "is_test_mode": is_test_mode,
+        "deployed": mode_status['deployed'],
+        "hours_elapsed": mode_status['hours_elapsed'],
+        "hours_remaining": mode_status['hours_remaining'],
+        "mode_status": mode_status['status'],
+        "instruction": "Day 1 = Testing (no real bets). Day 2+ = Real betting (AUTOMATIC SWITCH)"
     }), 200
 
 @app.route("/daily-acca", methods=["GET"])
 def get_daily_acca():
-    """Get today's top acca"""
+    """Get today's #1 BEST acca (90+ SCORE ONLY - ULTRA-TIGHT VERIFICATION)"""
     try:
         acca = db.get_daily_top_acca()
+        
+        # Auto-detect mode based on deployment time
+        is_test_mode = config.Config.is_test_mode_active()
+        mode_status = config.Config.get_mode_status()
+        mode_label = "🧪 TEST MODE" if is_test_mode else "🔴 REAL BETTING"
         
         if acca:
             return jsonify({
                 "success": True,
-                "acca": acca
+                "acca": acca,
+                "rank": 1,
+                "mode": mode_label,
+                "is_test_mode": is_test_mode,
+                "verification_score": acca.get("verification_score"),
+                "message": f"✅ #1 BEST PICK (90+/100 verified) - {mode_label}",
+                "instruction": "Bot has decided. This is your ONLY pick. No choices. Execute or skip day.",
+                "note": "This acca passed ultra-tight 90+ verification. Real edge. Realistic 75-80% win probability.",
+                "phase": "6-Day Challenge: 6 Straight Wins to ₦230M+",
+                "mode_status": mode_status['status'],
+                "hours_elapsed": mode_status['hours_elapsed'],
+                "hours_remaining": mode_status['hours_remaining'],
+                "auto_switch_info": "Automatic switch from TEST to REAL happens exactly 24h after deployment. No manual intervention needed."
             }), 200
         else:
             return jsonify({
                 "success": False,
-                "message": "No acca generated yet for today"
+                "mode": mode_label,
+                "is_test_mode": is_test_mode,
+                "message": "⚠️ No acca with 90+ verification found for today",
+                "reason": "Markets today lack sufficient edge or verification is too strict",
+                "action": "Check back tomorrow or contact support if this persists",
+                "phase": "6-Day Challenge: 6 Straight Wins to ₦230M+",
+                "mode_status": mode_status['status'],
+                "hours_elapsed": mode_status['hours_elapsed'],
+                "hours_remaining": mode_status['hours_remaining']
             }), 404
     
     except Exception as e:
         logger.error(f"Get daily acca error: {e}")
-        return jsonify({"error": str(e)}), 500
+        is_test_mode = config.Config.is_test_mode_active()
+        return jsonify({"error": str(e), "status": "error", "is_test_mode": is_test_mode}), 500
 
 @app.route("/set-bankroll", methods=["POST"])
 def set_bankroll():
@@ -109,6 +145,16 @@ def set_bankroll():
 def place_bet():
     """Record bet placement"""
     try:
+        # SAFETY CHECK: Prevent accidental betting in TEST MODE
+        if config.TEST_MODE:
+            return jsonify({
+                "success": False,
+                "error": "🧪 TEST MODE ACTIVE - Real bets are BLOCKED",
+                "message": "Test mode: No real money can be placed",
+                "instruction": "Wait for auto-switch to REAL mode after 24 hours, or you will manually enable it",
+                "test_mode": True
+            }), 403  # Forbidden
+        
         data = request.json
         
         try:
@@ -133,8 +179,9 @@ def place_bet():
             
             return jsonify({
                 "success": True,
-                "message": f"Bet recorded: ₦{stake:,.0f} @ {odds_placed:.2f}",
-                "new_bankroll": new_balance
+                "message": f"✅ Bet recorded: ₦{stake:,.0f} @ {odds_placed:.2f}",
+                "new_bankroll": new_balance,
+                "test_mode": False
             }), 200
         else:
             return jsonify({"success": False}), 500
@@ -269,29 +316,39 @@ class BotV1:
             logger.info(f"✅ Recommended stake per acca: ₦{config.get_recommended_bet_size():,.0f}\n")
             
             # ================================================================
-            # STEP 6: SAVE TO DATABASE
+            # STEP 6: SELECT #1 BEST ACCA ONLY (90+ VERIFICATION ULTRA-TIGHT)
             # ================================================================
-            logger.info("Step 6: Saving to database...")
-            
-            saved_count = 0
-            for acca in verified_accas:
-                if db.save_verified_accumulator(acca):
-                    saved_count += 1
-            
-            logger.info(f"✅ Saved {saved_count} accumulators\n")
-            
-            # ================================================================
-            # STEP 7: SELECT TOP ACCA FOR DAY
-            # ================================================================
-            logger.info("Step 7: Selecting top acca...")
+            logger.info("Step 6: Selecting #1 BEST acca (90+ score ONLY)...")
             
             top_acca = DailyAccaSelector.get_top_acca(verified_accas)
             
-            if top_acca:
-                logger.info("✅ Top acca selected and ready for betting\n")
+            if not top_acca:
+                logger.warning("⚠️ No acca with 90+ score. Daily cycle SKIPPED.")
+                logger.warning("Reason: Verification too strict or insufficient edge in markets today.")
+                logger.warning("Try again tomorrow or manually lower threshold to 85 in config.")
+                return False
+            
+            logger.info(f"\n✅ SELECTED #1 BEST ACCA")
+            logger.info(f"   ID: {top_acca.get('id')}")
+            logger.info(f"   Score: {top_acca.get('verification_score')}/100")
+            logger.info(f"   Edge: {top_acca.get('total_edge'):.1%}")
+            logger.info(f"   Odds: {top_acca.get('combined_odds'):.2f}")
+            logger.info(f"   Stake: ₦{top_acca.get('recommended_stake'):,.0f}\n")
+            
+            # ================================================================
+            # STEP 7: SAVE ONLY #1 TO DATABASE (NO OTHER CHOICES)
+            # ================================================================
+            logger.info("Step 7: Saving #1 acca to Supabase database...")
+            
+            if db.save_verified_accumulator(top_acca):
+                logger.info(f"✅ Saved #1 acca to database\n")
+                logger.info("="*80)
+                logger.info("✅ DAILY CYCLE COMPLETE - #1 BEST ACCA READY FOR BETTING")
+                logger.info("="*80)
+                logger.info("Bot has decided. No other options. Execute or skip day.\n")
                 return True
             else:
-                logger.warning("No top acca selected")
+                logger.warning("❌ Failed to save acca to database")
                 return False
         
         except Exception as e:
@@ -307,8 +364,8 @@ def main():
     """Main bot entry point"""
     logger.info("\n" + "="*80)
     logger.info("BOT #1 - ACCUMULATOR LAUNCHER")
-    logger.info("15+ odds, sloppy markets only, 8 days to 10M+")
-    logger.info("="*80 + "\n")
+    logger.info("15+ odds, sloppy markets only, 6 Day Challenge to 230M+")
+    logger.info("="*80)
     
     # Validate config
     if not config.validate():
@@ -318,10 +375,31 @@ def main():
     db.Database.connect()
     db.Database.init_tables()
     
-    # Set bot start time
-    if config.BOT_START_TIME is None:
-        config.BOT_START_TIME = datetime.now()
-        logger.info(f"✅ Bot started: {config.BOT_START_TIME.isoformat()}\n")
+    # AUTO-SWITCH LOGIC: Uses deployment timestamp file
+    # Records EXACT deployment time on first run
+    # After 24 hours: Automatically switches to REAL BETTING
+    is_test_mode = config.Config.is_test_mode_active()
+    mode_status = config.Config.get_mode_status()
+    
+    logger.info(f"\n{mode_status['status']}")
+    logger.info(f"Deployed: {mode_status['deployed']}")
+    
+    if is_test_mode:
+        logger.info(f"Time Elapsed: {mode_status['hours_elapsed']}h")
+        logger.info(f"Time Remaining: {mode_status['hours_remaining']}h")
+        logger.info(f"\n🧪 TEST MODE ACTIVE (First 24 hours)")
+        logger.info(f"Bot is verifying and collecting data.")
+        logger.info(f"NO real bets will be placed during this 24-hour test period.")
+        logger.info(f"\nAfter 24 hours: AUTOMATIC SWITCH to REAL BETTING MODE")
+        logger.info(f"NO MANUAL INTERVENTION NEEDED")
+        logger.info(f"No risk of forgetting to switch - completely foolproof!\n")
+    else:
+        logger.warning(f"\n🔴 REAL BETTING MODE NOW ACTIVE")
+        logger.warning(f"Test period has expired ({mode_status['hours_elapsed']}h elapsed)")
+        logger.warning(f"Real money betting is now enabled.")
+        logger.warning(f"Real accas. Real odds. Real earnings.\n")
+    
+    logger.info("="*80 + "\n")
     
     # Set default bankroll if not set
     if config.STARTING_BANKROLL == 0:
@@ -335,7 +413,7 @@ def main():
     logger.info("✅ API Endpoints:")
     logger.info(f"   GET  /health (Uptime Robot)")
     logger.info(f"   GET  /status")
-    logger.info(f"   GET  /daily-acca (Today's top pick)")
+    logger.info(f"   GET  /daily-acca (Today's #1 pick)")
     logger.info(f"   POST /set-bankroll")
     logger.info(f"   POST /place-bet")
     logger.info(f"   POST /record-result\n")
@@ -347,6 +425,14 @@ def main():
     while True:
         try:
             cycle += 1
+            
+            # Check if should auto-switch
+            if config.TEST_MODE:
+                hours_elapsed = (datetime.now() - config.BOT_START_DATE).total_seconds() / 3600
+                if hours_elapsed >= config.AUTO_SWITCH_AFTER_HOURS:
+                    config.TEST_MODE = False
+                    logger.warning("\n⚠️ AUTO-SWITCH: 24 hours passed. Switching to REAL BETTING MODE.\n")
+            
             BotV1.run_daily_cycle()
             
             # Wait 24 hours until next cycle

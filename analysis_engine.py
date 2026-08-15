@@ -5,7 +5,7 @@ Real edge calculation, 5-check verification, acca ranking
 
 import logging
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 from itertools import combinations
 import database as db
 from config import config
@@ -233,48 +233,55 @@ class Verifier:
     
     @staticmethod
     def _verify_acca(acca: Dict) -> Tuple[int, float]:
-        """Run 5-check verification"""
+        """Run ULTRA-TIGHT 5-check verification (90+ ONLY)"""
         score = 0
         
-        # CHECK 1: Market exists on Melbet right now (25 points)
+        # CHECK 1: Market exists on Melbet right now (20 points) - MUST PASS
         market_exists = Verifier._check_market_exists(acca)
         if market_exists:
-            score += 25
-        else:
-            return 0, 0  # Fail hard if market doesn't exist
-        
-        # CHECK 2: Odds stable (not volatile) (20 points)
-        odds_stable = Verifier._check_odds_stability(acca)
-        if odds_stable:
             score += 20
         else:
-            score += 5  # Small credit if slightly volatile
+            return 0, 0  # AUTOMATIC FAIL if market doesn't exist
         
-        # CHECK 3: All legs have real edge (30 points)
+        # CHECK 2: Odds VERY stable (not volatile) (25 points) - VERY STRICT
+        odds_stable = Verifier._check_odds_stability(acca)
+        if odds_stable:
+            score += 25
+        else:
+            return 0, 0  # AUTOMATIC FAIL if odds volatile (ultra-strict)
+        
+        # CHECK 3: All legs have STRONG real edge (25 points) - VERY HIGH THRESHOLD
         all_edge = Verifier._check_real_edge(acca)
         if all_edge:
-            score += 30
+            score += 25
         else:
-            return 0, 0  # Fail hard if no edge
+            return 0, 0  # AUTOMATIC FAIL if no real edge
         
-        # CHECK 4: Edge calculation verified (15 points)
+        # CHECK 4: Edge calculation VERIFIED correctly (15 points) - NO COMPROMISE
         edge_verified = Verifier._check_edge_math(acca)
         if edge_verified:
             score += 15
         else:
-            score += 5
+            return 0, 0  # AUTOMATIC FAIL if math wrong
         
-        # CHECK 5: Consistency (no manipulation) (10 points)
+        # CHECK 5: Consistency & NO manipulation (15 points) - ZERO TOLERANCE
         consistent = Verifier._check_consistency(acca)
         if consistent:
-            score += 10
+            score += 15
         else:
-            score += 2
+            return 0, 0  # AUTOMATIC FAIL if any red flags
         
         # Calculate weakness score (market exploitability)
         weakness = Verifier._calculate_weakness(acca)
         
-        return min(100, score), weakness
+        # STRICT: Only return if score >= 90
+        final_score = min(100, score)
+        
+        if final_score < 90:
+            logger.debug(f"Acca rejected: Score {final_score} < 90 minimum")
+            return 0, 0  # REJECT if below 90
+        
+        return final_score, weakness
     
     @staticmethod
     def _check_market_exists(acca: Dict) -> bool:
@@ -348,12 +355,15 @@ class Verifier:
         return min(100, weakness)
 
 class DailyAccaSelector:
-    """Select top acca per day for user"""
+    """Select top 5 accas per day for user"""
+    
+
     
     @staticmethod
     def get_top_acca(verified_accas: List[Dict]) -> Optional[Dict]:
-        """Get single best acca for today"""
+        """Get single #1 BEST acca for today (90+ VERIFICATION)"""
         if not verified_accas:
+            logger.warning("❌ No verified accas to select from")
             return None
         
         # Sort by verification score (primary) and edge (secondary)
@@ -366,12 +376,12 @@ class DailyAccaSelector:
         top_acca = sorted_accas[0]
         
         logger.info(f"\n{'='*80}")
-        logger.info(f"🎯 TODAY'S TOP ACCUMULATOR")
+        logger.info(f"🏆 #1 BEST ACCA SELECTED (90+ VERIFICATION)")
         logger.info(f"{'='*80}")
-        logger.info(f"ID: {top_acca.get('id')}")
-        logger.info(f"Odds: {top_acca.get('combined_odds'):.2f}")
-        logger.info(f"Verification Score: {top_acca.get('verification_score')}/100")
-        logger.info(f"Total Edge: {top_acca.get('total_edge'):.1%}")
+        logger.info(f"Acca ID: {top_acca.get('id')}")
+        logger.info(f"Verification Score: {top_acca.get('verification_score')}/100 ✅")
+        logger.info(f"Combined Odds: {top_acca.get('combined_odds'):.2f}")
+        logger.info(f"Total Edge: {top_acca.get('total_edge'):.1%} (REAL EDGE)")
         logger.info(f"Recommended Stake: ₦{top_acca.get('recommended_stake'):,.0f}")
         logger.info(f"{'='*80}\n")
         

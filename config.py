@@ -26,19 +26,121 @@ class Config:
     CURRENT_BANKROLL = 0  # Tracks current amount
     PHASE_1_TARGET = 10_000_000  # 10M target
     
+    # === 6-DAY CHALLENGE ===
+    CHALLENGE_DAYS = 6  # 6 straight wins target
+    CHALLENGE_MODE = True  # Track challenge progress
+    
     # === BETTING RULES (PHASE 1 ONLY) ===
     PHASE_1_BET_FRACTION = 0.50  # 50% per bet (UNTIL 10M)
+    
+    # === BOT MODE & DAY TRACKING (AUTOMATIC 24-HOUR SWITCH) ===
+    DEPLOYMENT_TIMESTAMP_FILE = "bot_deployment.log"  # Tracks EXACT deployment time
+    AUTO_SWITCH_AFTER_HOURS = 24  # Auto-switch from TEST to REAL after exactly 24 hours
+    
+    @staticmethod
+    def record_deployment_time():
+        """Record exact bot deployment timestamp on FIRST startup"""
+        try:
+            if not os.path.exists(Config.DEPLOYMENT_TIMESTAMP_FILE):
+                deployment_time = datetime.now()
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'w') as f:
+                    f.write(deployment_time.isoformat())
+                return deployment_time
+            else:
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'r') as f:
+                    return datetime.fromisoformat(f.read().strip())
+        except Exception as e:
+            return datetime.now()
+    
+    @staticmethod
+    def is_test_mode_active():
+        """
+        AUTO-DETERMINE if TEST MODE should be active.
+        
+        LOGIC:
+        - First 24 hours after deployment = TEST MODE (no real bets)
+        - After 24 hours = REAL BETTING MODE (real bets)
+        - NO MANUAL INTERVENTION NEEDED
+        - FOOLPROOF: Can't forget to switch
+        """
+        try:
+            # Get deployment time
+            if os.path.exists(Config.DEPLOYMENT_TIMESTAMP_FILE):
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'r') as f:
+                    deployment_time = datetime.fromisoformat(f.read().strip())
+            else:
+                # First run: Set deployment time
+                deployment_time = Config.record_deployment_time()
+            
+            # Calculate hours elapsed since deployment
+            now = datetime.now()
+            hours_elapsed = (now - deployment_time).total_seconds() / 3600
+            
+            # TEST MODE runs for exactly 24 hours
+            if hours_elapsed < 24:
+                hours_remaining = 24 - hours_elapsed
+                return True  # Still in TEST MODE
+            else:
+                # After 24 hours: AUTO-SWITCH to REAL BETTING
+                return False  # REAL BETTING MODE
+        
+        except Exception:
+            # Default to TEST MODE if any error
+            return True
+    
+    @staticmethod
+    def get_mode_status():
+        """Get detailed mode status for logging"""
+        try:
+            if os.path.exists(Config.DEPLOYMENT_TIMESTAMP_FILE):
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'r') as f:
+                    deployment_time = datetime.fromisoformat(f.read().strip())
+                
+                now = datetime.now()
+                hours_elapsed = (now - deployment_time).total_seconds() / 3600
+                
+                if hours_elapsed < 24:
+                    hours_remaining = 24 - hours_elapsed
+                    return {
+                        "mode": "TEST",
+                        "deployed": deployment_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "hours_elapsed": round(hours_elapsed, 1),
+                        "hours_remaining": round(hours_remaining, 1),
+                        "status": f"🧪 TEST MODE ({round(hours_remaining, 1)}h remaining)"
+                    }
+                else:
+                    return {
+                        "mode": "REAL",
+                        "deployed": deployment_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "hours_elapsed": round(hours_elapsed, 1),
+                        "hours_remaining": 0,
+                        "status": f"🔴 REAL BETTING ACTIVE ({round(hours_elapsed, 1)}h since deployment)"
+                    }
+            else:
+                return {
+                    "mode": "TEST",
+                    "deployed": "Not yet",
+                    "hours_elapsed": 0,
+                    "hours_remaining": 24,
+                    "status": "🧪 TEST MODE (First run)"
+                }
+        except Exception:
+            return {
+                "mode": "TEST",
+                "status": "🧪 TEST MODE (Default)"
+            }
     
     # === ACCUMULATOR RULES (LOCKED) ===
     MIN_LEGS_PER_ACCA = 3
     MAX_LEGS_PER_ACCA = 3
-    MIN_COMBINED_ODDS = 15.0  # 15+ odds ONLY (not 22)
+    MIN_COMBINED_ODDS = 15.0  # 15+ odds ONLY
     MAX_COMBINED_ODDS = 150.0
     
-    # === VERIFICATION RULES ===
-    MIN_VERIFICATION_SCORE = 80  # 80+/100 minimum (strict)
-    MIN_CONFIDENCE_PER_LEG = 0.65
-    MIN_EDGE_PER_LEG = 0.08  # 8%+ edge minimum
+    # === VERIFICATION RULES - 90+ ONLY (ULTRA-TIGHT) ===
+    MIN_VERIFICATION_SCORE = 90  # 90+/100 ONLY (ultra-tight, best accas)
+    BACKUP_VERIFICATION_SCORE = 85  # Fallback if <2 at 90 (rare)
+    MIN_CONFIDENCE_PER_LEG = 0.75  # 75%+ confidence only (higher threshold)
+    MIN_EDGE_PER_LEG = 0.15  # 15%+ edge minimum (only real exploitable edge)
     
     # === SLOPPY MARKETS ONLY ===
     SLOPPY_MARKETS = [
