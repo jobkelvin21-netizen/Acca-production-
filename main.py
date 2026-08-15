@@ -48,8 +48,8 @@ def health():
 @app.route("/status", methods=["GET"])
 def status():
     """Bot status with automatic mode detection"""
-    is_test_mode = config.Config.is_test_mode_active()
-    mode_status = config.Config.get_mode_status()
+    is_test_mode = config.is_test_mode_active()
+    mode_status = config.get_mode_status()
     mode_label = "🧪 TEST MODE" if is_test_mode else "🔴 REAL BETTING"
     
     return jsonify({
@@ -73,8 +73,8 @@ def get_daily_acca():
         acca = db.get_daily_top_acca()
         
         # Auto-detect mode based on deployment time
-        is_test_mode = config.Config.is_test_mode_active()
-        mode_status = config.Config.get_mode_status()
+        is_test_mode = config.is_test_mode_active()
+        mode_status = config.get_mode_status()
         mode_label = "🧪 TEST MODE" if is_test_mode else "🔴 REAL BETTING"
         
         if acca:
@@ -110,7 +110,7 @@ def get_daily_acca():
     
     except Exception as e:
         logger.error(f"Get daily acca error: {e}")
-        is_test_mode = config.Config.is_test_mode_active()
+        is_test_mode = config.is_test_mode_active()
         return jsonify({"error": str(e), "status": "error", "is_test_mode": is_test_mode}), 500
 
 @app.route("/set-bankroll", methods=["POST"])
@@ -146,7 +146,7 @@ def place_bet():
     """Record bet placement"""
     try:
         # SAFETY CHECK: Prevent accidental betting in TEST MODE
-        if config.TEST_MODE:
+        if config.is_test_mode_active():
             return jsonify({
                 "success": False,
                 "error": "🧪 TEST MODE ACTIVE - Real bets are BLOCKED",
@@ -378,8 +378,8 @@ def main():
     # AUTO-SWITCH LOGIC: Uses deployment timestamp file
     # Records EXACT deployment time on first run
     # After 24 hours: Automatically switches to REAL BETTING
-    is_test_mode = config.Config.is_test_mode_active()
-    mode_status = config.Config.get_mode_status()
+    is_test_mode = config.is_test_mode_active()
+    mode_status = config.get_mode_status()
     
     logger.info(f"\n{mode_status['status']}")
     logger.info(f"Deployed: {mode_status['deployed']}")
@@ -425,13 +425,6 @@ def main():
     while True:
         try:
             cycle += 1
-            
-            # Check if should auto-switch
-            if config.TEST_MODE:
-                hours_elapsed = (datetime.now() - config.BOT_START_DATE).total_seconds() / 3600
-                if hours_elapsed >= config.AUTO_SWITCH_AFTER_HOURS:
-                    config.TEST_MODE = False
-                    logger.warning("\n⚠️ AUTO-SWITCH: 24 hours passed. Switching to REAL BETTING MODE.\n")
             
             BotV1.run_daily_cycle()
             
