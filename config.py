@@ -136,11 +136,38 @@ class Config:
     MIN_COMBINED_ODDS = 15.0  # 15+ odds ONLY
     MAX_COMBINED_ODDS = 150.0
     
-    # === VERIFICATION RULES - 90+ ONLY (ULTRA-TIGHT) ===
-    MIN_VERIFICATION_SCORE = 90  # 90+/100 ONLY (ultra-tight, best accas)
-    BACKUP_VERIFICATION_SCORE = 85  # Fallback if <2 at 90 (rare)
-    MIN_CONFIDENCE_PER_LEG = 0.75  # 75%+ confidence only (higher threshold)
-    MIN_EDGE_PER_LEG = 0.15  # 15%+ edge minimum (only real exploitable edge)
+    # === VERIFICATION RULES - AUTO-SWITCHES BASED ON MODE ===
+    # Day 1 (TEST MODE): 85+ (more accas for testing)
+    # Day 2+ (REAL MODE): 90+ (best accas only for real money)
+    
+    TEST_MODE_VERIFICATION = 85  # Looser during testing
+    REAL_MODE_VERIFICATION = 90  # Strict during real betting
+    
+    @staticmethod
+    def get_min_verification_score():
+        """
+        Get verification score threshold based on current mode.
+        
+        TEST MODE (Day 1): 85+ - More accas for testing
+        REAL MODE (Day 2+): 90+ - Only best accas for real money
+        """
+        is_test_mode = Config.is_test_mode_active()
+        
+        if is_test_mode:
+            return Config.TEST_MODE_VERIFICATION  # 85+
+        else:
+            return Config.REAL_MODE_VERIFICATION  # 90+
+    
+    @staticmethod
+    def get_verification_status():
+        """Show current verification threshold"""
+        is_test_mode = Config.is_test_mode_active()
+        score = Config.get_min_verification_score()
+        
+        if is_test_mode:
+            return f"🧪 TEST MODE: {score}+ verification (more accas for testing)"
+        else:
+            return f"🔴 REAL MODE: {score}+ verification (best accas only)"
     
     # === SLOPPY MARKETS ONLY ===
     SLOPPY_MARKETS = [

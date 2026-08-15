@@ -50,7 +50,9 @@ def status():
     """Bot status with automatic mode detection"""
     is_test_mode = config.is_test_mode_active()
     mode_status = config.get_mode_status()
+    verification_status = config.get_verification_status()
     mode_label = "🧪 TEST MODE" if is_test_mode else "🔴 REAL BETTING"
+    min_score = config.get_min_verification_score()
     
     return jsonify({
         "bankroll": config.CURRENT_BANKROLL,
@@ -63,18 +65,22 @@ def status():
         "hours_elapsed": mode_status['hours_elapsed'],
         "hours_remaining": mode_status['hours_remaining'],
         "mode_status": mode_status['status'],
-        "instruction": "Day 1 = Testing (no real bets). Day 2+ = Real betting (AUTOMATIC SWITCH)"
+        "verification_score": min_score,
+        "verification_status": verification_status,
+        "instruction": "Day 1 = Testing with 85+ (more accas). Day 2+ = Real betting with 90+ (best accas only). AUTOMATIC SWITCH after 24h."
     }), 200
 
 @app.route("/daily-acca", methods=["GET"])
 def get_daily_acca():
-    """Get today's #1 BEST acca (90+ SCORE ONLY - ULTRA-TIGHT VERIFICATION)"""
+    """Get today's #1 BEST acca (Dynamic verification: 85+ TEST, 90+ REAL)"""
     try:
         acca = db.get_daily_top_acca()
         
         # Auto-detect mode based on deployment time
         is_test_mode = config.is_test_mode_active()
         mode_status = config.get_mode_status()
+        verification_status = config.get_verification_status()
+        min_score = config.get_min_verification_score()
         mode_label = "🧪 TEST MODE" if is_test_mode else "🔴 REAL BETTING"
         
         if acca:
@@ -85,21 +91,25 @@ def get_daily_acca():
                 "mode": mode_label,
                 "is_test_mode": is_test_mode,
                 "verification_score": acca.get("verification_score"),
-                "message": f"✅ #1 BEST PICK (90+/100 verified) - {mode_label}",
+                "verification_threshold": min_score,
+                "verification_status": verification_status,
+                "message": f"✅ #1 BEST PICK ({min_score}+/100 verified) - {mode_label}",
                 "instruction": "Bot has decided. This is your ONLY pick. No choices. Execute or skip day.",
-                "note": "This acca passed ultra-tight 90+ verification. Real edge. Realistic 75-80% win probability.",
+                "note": "This acca passed tight verification. Real edge. Realistic 75-80% win probability.",
                 "phase": "6-Day Challenge: 6 Straight Wins to ₦230M+",
                 "mode_status": mode_status['status'],
                 "hours_elapsed": mode_status['hours_elapsed'],
                 "hours_remaining": mode_status['hours_remaining'],
-                "auto_switch_info": "Automatic switch from TEST to REAL happens exactly 24h after deployment. No manual intervention needed."
+                "auto_switch_info": "Day 1 uses 85+ verification (more accas for testing). Day 2+ auto-switches to 90+ (best accas only)."
             }), 200
         else:
             return jsonify({
                 "success": False,
                 "mode": mode_label,
                 "is_test_mode": is_test_mode,
-                "message": "⚠️ No acca with 90+ verification found for today",
+                "verification_threshold": min_score,
+                "verification_status": verification_status,
+                "message": f"⚠️ No acca with {min_score}+ verification found for today",
                 "reason": "Markets today lack sufficient edge or verification is too strict",
                 "action": "Check back tomorrow or contact support if this persists",
                 "phase": "6-Day Challenge: 6 Straight Wins to ₦230M+",
@@ -146,7 +156,7 @@ def place_bet():
     """Record bet placement"""
     try:
         # SAFETY CHECK: Prevent accidental betting in TEST MODE
-        if config.is_test_mode_active():
+        if config.TEST_MODE:
             return jsonify({
                 "success": False,
                 "error": "🧪 TEST MODE ACTIVE - Real bets are BLOCKED",
@@ -380,22 +390,26 @@ def main():
     # After 24 hours: Automatically switches to REAL BETTING
     is_test_mode = config.is_test_mode_active()
     mode_status = config.get_mode_status()
+    verification_status = config.get_verification_status()
     
     logger.info(f"\n{mode_status['status']}")
     logger.info(f"Deployed: {mode_status['deployed']}")
+    logger.info(f"{verification_status}")
     
     if is_test_mode:
         logger.info(f"Time Elapsed: {mode_status['hours_elapsed']}h")
         logger.info(f"Time Remaining: {mode_status['hours_remaining']}h")
         logger.info(f"\n🧪 TEST MODE ACTIVE (First 24 hours)")
         logger.info(f"Bot is verifying and collecting data.")
+        logger.info(f"Verification: 85+ (More accas for testing)")
         logger.info(f"NO real bets will be placed during this 24-hour test period.")
         logger.info(f"\nAfter 24 hours: AUTOMATIC SWITCH to REAL BETTING MODE")
-        logger.info(f"NO MANUAL INTERVENTION NEEDED")
-        logger.info(f"No risk of forgetting to switch - completely foolproof!\n")
+        logger.info(f"After 24 hours: VERIFICATION AUTO-SWITCHES to 90+ (Best accas only)")
+        logger.info(f"NO MANUAL INTERVENTION NEEDED - Completely foolproof!\n")
     else:
         logger.warning(f"\n🔴 REAL BETTING MODE NOW ACTIVE")
         logger.warning(f"Test period has expired ({mode_status['hours_elapsed']}h elapsed)")
+        logger.warning(f"Verification: 90+ (Best accas only for real money)")
         logger.warning(f"Real money betting is now enabled.")
         logger.warning(f"Real accas. Real odds. Real earnings.\n")
     
@@ -425,6 +439,13 @@ def main():
     while True:
         try:
             cycle += 1
+            
+            # Check if should auto-switch
+            if config.TEST_MODE:
+                hours_elapsed = (datetime.now() - config.BOT_START_DATE).total_seconds() / 3600
+                if hours_elapsed >= config.AUTO_SWITCH_AFTER_HOURS:
+                    config.TEST_MODE = False
+                    logger.warning("\n⚠️ AUTO-SWITCH: 24 hours passed. Switching to REAL BETTING MODE.\n")
             
             BotV1.run_daily_cycle()
             

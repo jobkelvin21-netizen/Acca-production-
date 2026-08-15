@@ -401,24 +401,29 @@ class LiquipediaScraper:
 # ============================================================================
 
 def get_daily_top_acca() -> Optional[Dict]:
-    """Get today's #1 BEST verified acca (90+ SCORE ONLY - ULTRA-TIGHT)"""
+    """Get today's #1 BEST verified acca (Dynamic: 85+ TEST mode, 90+ REAL mode)"""
     try:
         db = Database.connect()
         
-        # Get single #1 best acca (90+ score ONLY, highest verification + edge)
-        # This ensures only ultra-quality accas are returned
+        # Get dynamic verification score based on current mode
+        min_score = config.get_min_verification_score()
+        mode_status = config.get_verification_status()
+        
+        logger.info(f"Using verification threshold: {mode_status}")
+        
+        # Get single #1 best acca (dynamic score ONLY, highest verification + edge)
         result = db.table("verified_accumulators").select("*").eq(
             "status", "pending"
-        ).gte("verification_score", 90).order(
+        ).gte("verification_score", min_score).order(
             "verification_score", desc=True
         ).order("edge_total", desc=True).limit(1).execute()
         
         acca = result.data[0] if result.data else None
         
         if acca:
-            logger.info(f"✅ #1 ACCA FOUND (90+ score): Score={acca.get('verification_score')}, Edge={acca.get('edge_total'):.1%}")
+            logger.info(f"✅ #1 ACCA FOUND ({min_score}+ score): Score={acca.get('verification_score')}, Edge={acca.get('total_edge'):.1%}")
         else:
-            logger.warning("⚠️ No acca with 90+ score found. Try again tomorrow or lower threshold to 85.")
+            logger.warning(f"⚠️ No acca with {min_score}+ score found. Try again later.")
         
         return acca
     

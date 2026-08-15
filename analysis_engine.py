@@ -5,7 +5,7 @@ Real edge calculation, 5-check verification, acca ranking
 
 import logging
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
 from itertools import combinations
 import database as db
 from config import config
@@ -213,12 +213,16 @@ class Verifier:
     def verify_accumulators(accas: List[Dict]) -> List[Dict]:
         """Verify accumulators using 5-check system"""
         verified = []
+        min_score = config.get_min_verification_score()
+        mode_status = config.get_verification_status()
+        
+        logger.info(f"Verification threshold: {mode_status}")
         
         for acca in accas:
             try:
                 score, weakness = Verifier._verify_acca(acca)
                 
-                if score >= config.MIN_VERIFICATION_SCORE:
+                if score >= min_score:
                     acca["verification_score"] = score
                     acca["weakness_score"] = weakness
                     acca["recommended_stake"] = config.get_recommended_bet_size()
@@ -228,7 +232,7 @@ class Verifier:
                 logger.warning(f"Verification error: {e}")
                 continue
         
-        logger.info(f"✅ Verified: {len(verified)} accumulators (80+/100)")
+        logger.info(f"✅ Verified: {len(verified)} accumulators ({min_score}+/100)")
         return verified
     
     @staticmethod
