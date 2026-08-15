@@ -5,7 +5,7 @@ Real edge calculation, 5-check verification, acca ranking
 
 import logging
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from itertools import combinations
 import database as db
 from config import config
