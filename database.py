@@ -65,8 +65,28 @@ class Database:
             return None
 
     @staticmethod
+    def supersede_old_picks(new_pick_id: str) -> bool:
+        """
+        Marks any previously 'pending' picks as 'superseded' before a new
+        pick is saved, so the table never has more than one truly active
+        pending pick at a time - not just relying on dashboards to sort by
+        newest.
+        """
+        try:
+            dbc = Database.connect()
+            dbc.table("verified_accumulators_a").update(
+                {"status": "superseded"}
+            ).eq("status", "pending").neq("id", new_pick_id).execute()
+            logger.info("✅ Old pending picks marked as superseded")
+            return True
+        except Exception as e:
+            logger.warning(f"Supersede step failed (non-critical): {e}")
+            return False
+
+    @staticmethod
     def save_verified_accumulator(acca: Dict) -> bool:
-        """Saves the SINGLE #1 pick of the day. Confirmed by readback."""
+        """Saves the SINGLE #1 pick of the day. Confirmed by readback.
+        Also supersedes any older pending picks so only one is ever active."""
         try:
             dbc = Database.connect()
             payload = {
@@ -87,6 +107,10 @@ class Database:
             confirm = dbc.table("verified_accumulators_a").select("id").eq("id", acca["id"]).execute()
             if confirm.data:
                 logger.info(f"✅ CONFIRMED IN SUPABASE: pick {acca['id']} saved and readable")
+
+                # Supersede any older pending picks now that the new one is confirmed saved
+                Database.supersede_old_picks(acca["id"])
+
                 try:
                     dbc.table("pick_log_a").insert({
                         "accumulator_id": acca["id"], "reasoning": acca.get("reasoning"),
