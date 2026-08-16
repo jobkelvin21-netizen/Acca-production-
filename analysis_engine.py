@@ -1,392 +1,176 @@
 """
-analysis_engine.py - BOT #1 ANALYSIS ENGINE
-Real edge calculation, 5-check verification, acca ranking
+analysis_engine.py - BOT A: 15+ ODDS HUNTER
+Strategy: multi-platform price comparison (Melbet vs other books) + raw real
+stats shown transparently (no invented probability formula). Builds 3-leg
+accas (each leg >=2.0 odds, no correlation, tight kickoff window, only
+market types with real data backing). Verifies (90+). Among everything
+verified, ranks by combined signal strength (price gap + real-data support),
+targets 15+ but shows the best verified pick regardless of exact number -
+no hard floor, no cap. Only #1 is ever surfaced.
 """
 
 import logging
+import uuid
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 from itertools import combinations
-import database as db
 from config import config
+from database import ComparisonOddsScraper
 
-logger = logging.getLogger("analysis_engine")
+logger = logging.getLogger("analysis_engine_a")
 
-class EdgeCalculator:
-    """Calculate REAL edge (not AI guessing)"""
-    
-    @staticmethod
-    def calculate_edge(leg: Dict) -> float:
-        """Calculate true edge from odds and data"""
-        try:
-            market_odds = leg.get("odds", 2.0)
-            market_probability = 1.0 / market_odds
-            
-            # Get real data from scrapers
-            true_probability = EdgeCalculator._estimate_true_probability(leg)
-            
-            # Edge = How much better our estimate is than market
-            edge = true_probability - market_probability
-            
-            return max(0, edge)  # No negative edges
-        
-        except Exception as e:
-            logger.warning(f"Edge calculation error: {e}")
-            return 0
-    
-    @staticmethod
-    def _estimate_true_probability(leg: Dict) -> float:
-        """Estimate TRUE probability from real data"""
-        try:
-            sport = leg.get("sport", "").lower()
-            league = leg.get("league", "").lower()
-            market_type = leg.get("market_type", "").lower()
-            
-            # FOOTBALL (xG-based estimation)
-            if "football" in sport or "soccer" in sport:
-                return EdgeCalculator._football_probability(leg)
-            
-            # CRICKET (data-driven)
-            elif "cricket" in sport:
-                return EdgeCalculator._cricket_probability(leg)
-            
-            # TENNIS (H2H-based)
-            elif "tennis" in sport:
-                return EdgeCalculator._tennis_probability(leg)
-            
-            # ESPORTS (winrate-based)
-            elif "esports" in sport:
-                return EdgeCalculator._esports_probability(leg)
-            
-            # Default conservative estimate
-            else:
-                market_odds = leg.get("odds", 2.0)
-                return 0.5 + (1.0 / market_odds - 0.5) * 0.1  # Slight edge only
-        
-        except Exception as e:
-            logger.warning(f"True probability estimation error: {e}")
-            return 1.0 / leg.get("odds", 2.0)
-    
-    @staticmethod
-    def _football_probability(leg: Dict) -> float:
-        """Calculate probability using xG data"""
-        # Get real xG stats
-        team_stats = db.FBRefScraper.get_team_stats(leg.get("selection"))
-        
-        # If team is overperforming (xG 2.1, goals 2.8), regression expected
-        overperf = team_stats.get("overperformance_ratio", 1.0)
-        
-        # Base: Expected goals
-        xg = team_stats.get("xg_per_match", 2.0)
-        
-        # Adjust for overperformance
-        if overperf > 1.25:  # Team is 25%+ above xG
-            # Likely to regress
-            adjusted_probability = (xg / 2.5) * 0.9  # Discount by 10%
-        else:
-            adjusted_probability = xg / 2.5
-        
-        return min(0.95, max(0.20, adjusted_probability))
-    
-    @staticmethod
-    def _cricket_probability(leg: Dict) -> float:
-        """Calculate probability for cricket overs/props"""
-        # Cricket markets often misprice overs
-        # Sample: Over 2.5 wickets in innings
-        # Historical: Averages 3.2 wickets
-        # But bookmakers price at 50% (odds 2.0)
-        # Real probability: 62%
-        
-        return 0.62  # Conservative estimate for sloppy cricket markets
-    
-    @staticmethod
-    def _tennis_probability(leg: Dict) -> float:
-        """Calculate probability using H2H and recent form"""
-        player1 = leg.get("selection")
-        
-        # Get H2H record
-        h2h = db.ESPNScraper.get_h2h_record(player1, "opponent")
-        h2h_prob = h2h.get("win_percentage", 0.5)
-        
-        # Get recent form
-        form = db.ESPNScraper.get_player_form(player1, "tennis")
-        form_rating = form.get("form_rating", 0.5)
-        
-        # Combine: 60% H2H, 40% recent form
-        combined = (h2h_prob * 0.6) + (form_rating * 0.4)
-        
-        return min(0.95, max(0.20, combined))
-    
-    @staticmethod
-    def _esports_probability(leg: Dict) -> float:
-        """Calculate probability using team winrate"""
-        team_name = leg.get("selection")
-        
-        # Get real esports stats from Liquipedia
-        stats = db.LiquipediaScraper.get_team_stats(team_name)
-        
-        # Recent winrate is more predictive
-        recent_wr = stats.get("recent_winrate", 0.5)
-        
-        return min(0.95, max(0.20, recent_wr))
 
 class AccumulatorBuilder:
-    """Build 3-leg accumulators from verified legs"""
-    
+
     @staticmethod
-    def build_accumulators(analyzed_legs: List[Dict]) -> List[Dict]:
-        """Build 3-leg accumulators from sloppy markets only"""
+    def _same_team_or_event(leg1: Dict, leg2: Dict) -> bool:
+        return leg1.get("team_id") == leg2.get("team_id") or \
+            (leg1.get("league") == leg2.get("league") and leg1.get("selection") == leg2.get("selection"))
+
+    @staticmethod
+    def _within_kickoff_window(legs: List[Dict]) -> bool:
         try:
-            # Filter: Only sloppy market legs
-            sloppy_legs = [
-                l for l in analyzed_legs
-                if AccumulatorBuilder._is_sloppy_market(l)
-            ]
-            
-            if len(sloppy_legs) < 3:
-                logger.warning("Not enough sloppy market legs")
-                return []
-            
-            valid_accas = []
-            
-            # Generate all 3-leg combinations
-            for combo in combinations(sloppy_legs, 3):
-                legs = list(combo)
-                
-                # Calculate combined odds
-                combined_odds = 1.0
-                total_edge = 0.0
-                
-                for leg in legs:
-                    combined_odds *= leg.get("odds", 1.0)
-                    total_edge += leg.get("edge", 0)
-                
-                # Check: Meets minimum odds (15+)
-                if combined_odds < config.MIN_COMBINED_ODDS:
-                    continue
-                
-                # Check: All legs have sufficient edge (8%+)
-                if not all(l.get("edge", 0) >= config.MIN_EDGE_PER_LEG for l in legs):
-                    continue
-                
-                # Create acca
-                acca = {
-                    "id": f"ACC-{int(datetime.now().timestamp())}-{len(valid_accas)}",
-                    "legs": legs,
-                    "combined_odds": combined_odds,
-                    "total_edge": total_edge,
-                    "avg_edge": total_edge / 3,
-                    "created_at": datetime.now().isoformat(),
-                }
-                
-                valid_accas.append(acca)
-            
-            logger.info(f"✅ Built {len(valid_accas)} valid accumulators")
-            return valid_accas
-        
-        except Exception as e:
-            logger.error(f"Build accumulators error: {e}")
-            return []
-    
+            times = [datetime.fromisoformat(l["kickoff_time"]) for l in legs]
+            spread_hours = (max(times) - min(times)).total_seconds() / 3600
+            return spread_hours <= config.KICKOFF_WINDOW_HOURS
+        except Exception:
+            return False
+
     @staticmethod
-    def _is_sloppy_market(leg: Dict) -> bool:
-        """Check if leg is from sloppy market"""
-        league = leg.get("league", "").lower()
-        market = leg.get("market_type", "").lower()
-        
-        # Check against SLOPPY markets list
-        for sloppy in config.SLOPPY_MARKETS:
-            if sloppy in league or sloppy in market:
-                return True
-        
-        # Check against SHARP markets (reject)
-        for sharp in config.SHARP_MARKETS:
-            if sharp in league or sharp in market:
-                return False
-        
-        return True
+    def build_candidates(all_legs: List[Dict]) -> List[Dict]:
+        legs = [l for l in all_legs if l.get("odds", 0) >= config.MIN_ODDS_PER_LEG]
+        if config.QUICK_FINISH_PREFERENCE:
+            quick = [l for l in legs if l.get("is_quick_finish")]
+            other = [l for l in legs if not l.get("is_quick_finish")]
+            legs = quick + other
+
+        candidates = []
+        for combo in combinations(legs[:25], config.LEGS_PER_ACCA):
+            if not config.ALLOW_CORRELATED_LEGS:
+                if any(AccumulatorBuilder._same_team_or_event(combo[i], combo[j])
+                       for i in range(len(combo)) for j in range(i + 1, len(combo))):
+                    continue
+            if not AccumulatorBuilder._within_kickoff_window(list(combo)):
+                continue
+
+            combined_odds = 1.0
+            for leg in combo:
+                combined_odds *= leg["odds"]
+
+            candidates.append({
+                "id": f"BOTA-{uuid.uuid4().hex[:10].upper()}",
+                "legs": list(combo),
+                "combined_odds": round(combined_odds, 2),
+            })
+            if len(candidates) >= 60:
+                break
+
+        logger.info(f"✅ Bot A built {len(candidates)} candidate accas ({config.MIN_ODDS_PER_LEG}+ per leg, target ~{config.TARGET_COMBINED_ODDS})")
+        return candidates
+
 
 class Verifier:
-    """5-check verification system"""
-    
+    """5-check verification, 90+ required, no partial credit.
+    Real edge = Melbet priced meaningfully better than other-book consensus
+    (price gap), combined with real supporting stats shown transparently."""
+
     @staticmethod
-    def verify_accumulators(accas: List[Dict]) -> List[Dict]:
-        """Verify accumulators using 5-check system"""
+    def verify_all(candidates: List[Dict], real_data_lookup: Dict[str, Dict]) -> List[Dict]:
         verified = []
-        min_score = config.get_min_verification_score()
-        mode_status = config.get_verification_status()
-        
-        logger.info(f"Verification threshold: {mode_status}")
-        
-        for acca in accas:
-            try:
-                score, weakness = Verifier._verify_acca(acca)
-                
-                if score >= min_score:
-                    acca["verification_score"] = score
-                    acca["weakness_score"] = weakness
-                    acca["recommended_stake"] = config.get_recommended_bet_size()
-                    verified.append(acca)
-            
-            except Exception as e:
-                logger.warning(f"Verification error: {e}")
-                continue
-        
-        logger.info(f"✅ Verified: {len(verified)} accumulators ({min_score}+/100)")
+        for acca in candidates:
+            score, signal_strength, reasoning = Verifier._verify_acca(acca, real_data_lookup)
+            if score >= config.MIN_VERIFICATION_SCORE:
+                acca["verification_score"] = score
+                acca["signal_strength"] = round(signal_strength, 4)
+                acca["reasoning"] = reasoning
+                acca["recommended_stake"] = config.get_recommended_bet_size()
+                verified.append(acca)
+        logger.info(f"✅ Bot A verified {len(verified)} accas at {config.MIN_VERIFICATION_SCORE}+/100")
         return verified
-    
+
     @staticmethod
-    def _verify_acca(acca: Dict) -> Tuple[int, float]:
-        """Run ULTRA-TIGHT 5-check verification (90+ ONLY)"""
+    def _verify_acca(acca: Dict, real_data_lookup: Dict[str, Dict]) -> Tuple[int, float, str]:
         score = 0
-        
-        # CHECK 1: Market exists on Melbet right now (20 points) - MUST PASS
-        market_exists = Verifier._check_market_exists(acca)
-        if market_exists:
+        gaps = []
+        reasoning_parts = []
+
+        # CHECK 1: Market exists / real kickoff time (20 pts) - hard fail if missing
+        if all(l.get("kickoff_time") for l in acca["legs"]):
             score += 20
         else:
-            return 0, 0  # AUTOMATIC FAIL if market doesn't exist
-        
-        # CHECK 2: Odds VERY stable (not volatile) (25 points) - VERY STRICT
-        odds_stable = Verifier._check_odds_stability(acca)
-        if odds_stable:
-            score += 25
+            return 0, 0, ""
+
+        # CHECK 2: Kickoff window respected (20 pts) - hard fail if not
+        if AccumulatorBuilder._within_kickoff_window(acca["legs"]):
+            score += 20
         else:
-            return 0, 0  # AUTOMATIC FAIL if odds volatile (ultra-strict)
-        
-        # CHECK 3: All legs have STRONG real edge (25 points) - VERY HIGH THRESHOLD
-        all_edge = Verifier._check_real_edge(acca)
-        if all_edge:
-            score += 25
+            return 0, 0, ""
+
+        # CHECK 3: Melbet price meaningfully better than other-book consensus on every leg (30 pts)
+        all_gap_ok = True
+        for leg in acca["legs"]:
+            gap = ComparisonOddsScraper.get_price_gap(leg["odds"], leg.get("match_id", ""), leg.get("selection", ""))
+            if gap < config.MIN_PRICE_GAP_PERCENT:
+                all_gap_ok = False
+            gaps.append(gap)
+            real_data = real_data_lookup.get(leg.get("selection", ""), {})
+            summary = real_data.get("form_summary", "no data")
+            reasoning_parts.append(f"{leg.get('selection')}: {summary} | price {gap:+.1%} vs market")
+        if all_gap_ok:
+            score += 30
         else:
-            return 0, 0  # AUTOMATIC FAIL if no real edge
-        
-        # CHECK 4: Edge calculation VERIFIED correctly (15 points) - NO COMPROMISE
-        edge_verified = Verifier._check_edge_math(acca)
-        if edge_verified:
+            return 0, 0, ""
+
+        # CHECK 4: No correlated legs (15 pts) - hard fail if correlated
+        if not any(AccumulatorBuilder._same_team_or_event(acca["legs"][i], acca["legs"][j])
+                   for i in range(len(acca["legs"])) for j in range(i + 1, len(acca["legs"]))):
             score += 15
         else:
-            return 0, 0  # AUTOMATIC FAIL if math wrong
-        
-        # CHECK 5: Consistency & NO manipulation (15 points) - ZERO TOLERANCE
-        consistent = Verifier._check_consistency(acca)
-        if consistent:
+            return 0, 0, ""
+
+        # CHECK 5: Every leg is a supported market type with real data backing (15 pts)
+        if all(l.get("market_type") in config.SUPPORTED_MARKET_TYPES for l in acca["legs"]):
             score += 15
         else:
-            return 0, 0  # AUTOMATIC FAIL if any red flags
-        
-        # Calculate weakness score (market exploitability)
-        weakness = Verifier._calculate_weakness(acca)
-        
-        # STRICT: Only return if score >= 90
-        final_score = min(100, score)
-        
-        if final_score < 90:
-            logger.debug(f"Acca rejected: Score {final_score} < 90 minimum")
-            return 0, 0  # REJECT if below 90
-        
-        return final_score, weakness
-    
-    @staticmethod
-    def _check_market_exists(acca: Dict) -> bool:
-        """Verify market exists on Melbet"""
-        # In production: Make API call to Melbet
-        # For now: Assume if generated, market exists
-        return True
-    
-    @staticmethod
-    def _check_odds_stability(acca: Dict) -> bool:
-        """Check if odds haven't moved wildly"""
-        # In production: Compare odds from 5 min ago vs now
-        # For now: Assume stable
-        return True
-    
-    @staticmethod
-    def _check_real_edge(acca: Dict) -> bool:
-        """Verify all legs have real edge (not AI guessing)"""
-        legs = acca.get("legs", [])
-        
-        # All legs must have 8%+ edge
-        return all(l.get("edge", 0) >= config.MIN_EDGE_PER_LEG for l in legs)
-    
-    @staticmethod
-    def _check_edge_math(acca: Dict) -> bool:
-        """Verify edge is calculated correctly"""
-        legs = acca.get("legs", [])
-        total_edge = acca.get("total_edge", 0)
-        
-        # Recalculate
-        calculated_total = sum(l.get("edge", 0) for l in legs)
-        
-        # Should match
-        return abs(total_edge - calculated_total) < 0.01
-    
-    @staticmethod
-    def _check_consistency(acca: Dict) -> bool:
-        """Check for manipulation/suspicious patterns"""
-        legs = acca.get("legs", [])
-        
-        # All odds should be reasonable
-        for leg in legs:
-            if leg.get("odds", 1.0) > 100:  # Unrealistic odds
-                return False
-        
-        # No duplicate leagues in single acca
-        leagues = [l.get("league") for l in legs]
-        if len(leagues) != len(set(leagues)):  # Duplicates found
-            return False
-        
-        return True
-    
-    @staticmethod
-    def _calculate_weakness(acca: Dict) -> float:
-        """Calculate market exploitability score (0-100)"""
-        weakness = 50
-        
-        # More sloppy markets = more exploitable
-        sloppy_count = 0
-        for leg in acca.get("legs", []):
-            if "esports" in leg.get("league", "").lower():
-                sloppy_count += 1
-                weakness += 15
-            elif "championship" in leg.get("league", "").lower():
-                sloppy_count += 1
-                weakness += 12
-            elif "props" in leg.get("market_type", "").lower():
-                sloppy_count += 1
-                weakness += 10
-        
-        return min(100, weakness)
+            return 0, 0, ""
 
-class DailyAccaSelector:
-    """Select top 5 accas per day for user"""
-    
+        signal_strength = sum(gaps) / len(gaps) if gaps else 0.0
+        reasoning = " || ".join(reasoning_parts)
 
-    
+        return min(100, score), signal_strength, reasoning
+
+
+class DailyPickSelector:
+    """
+    BOT A RANKING RULE: among all verified candidates, pick the one with the
+    STRONGEST combined signal (average price-gap across all 3 legs vs other
+    bookmakers). Targets ~15+ combined odds, but no hard floor and no cap -
+    shows the best verified pick found that day regardless of exact number.
+    Only #1 is ever returned.
+    """
+
     @staticmethod
-    def get_top_acca(verified_accas: List[Dict]) -> Optional[Dict]:
-        """Get single #1 BEST acca for today (90+ VERIFICATION)"""
+    def get_best_pick(verified_accas: List[Dict]) -> Optional[Dict]:
         if not verified_accas:
-            logger.warning("❌ No verified accas to select from")
+            logger.warning("❌ Bot A: no verified accas today - nothing shown, this is normal.")
             return None
-        
-        # Sort by verification score (primary) and edge (secondary)
-        sorted_accas = sorted(
-            verified_accas,
-            key=lambda a: (a.get("verification_score", 0), a.get("total_edge", 0)),
-            reverse=True
-        )
-        
-        top_acca = sorted_accas[0]
-        
+
+        # Prefer picks near/above the 15+ target first, then fall back to strongest signal overall
+        near_target = [a for a in verified_accas if a["combined_odds"] >= config.TARGET_COMBINED_ODDS]
+        pool = near_target if near_target else verified_accas
+
+        ranked = sorted(pool, key=lambda a: a.get("signal_strength", 0), reverse=True)
+        best = ranked[0]
+
         logger.info(f"\n{'='*80}")
-        logger.info(f"🏆 #1 BEST ACCA SELECTED (90+ VERIFICATION)")
+        logger.info(f"🏆 BOT A - TODAY'S #1 PICK")
         logger.info(f"{'='*80}")
-        logger.info(f"Acca ID: {top_acca.get('id')}")
-        logger.info(f"Verification Score: {top_acca.get('verification_score')}/100 ✅")
-        logger.info(f"Combined Odds: {top_acca.get('combined_odds'):.2f}")
-        logger.info(f"Total Edge: {top_acca.get('total_edge'):.1%} (REAL EDGE)")
-        logger.info(f"Recommended Stake: ₦{top_acca.get('recommended_stake'):,.0f}")
+        logger.info(f"ID: {best['id']}")
+        logger.info(f"Combined Odds: {best['combined_odds']} (target was {config.TARGET_COMBINED_ODDS}+)")
+        logger.info(f"Verification Score: {best['verification_score']}/100")
+        logger.info(f"Signal Strength (avg price gap vs market): {best['signal_strength']:+.1%}")
+        logger.info(f"Reasoning: {best['reasoning']}")
+        logger.info(f"Recommended Stake: ₦{best['recommended_stake']:,.0f}")
         logger.info(f"{'='*80}\n")
-        
-        return top_acca
+
+        return best

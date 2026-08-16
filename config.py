@@ -1,257 +1,124 @@
 """
-config.py - BOT #1 CONFIGURATION
-15+ odds, sloppy markets only, Phase 1 bootstrap to 10M
+config.py - BOT A: 15+ ODDS HUNTER (multi-platform price comparison + raw data)
 """
 
 import os
 from datetime import datetime
-from dotenv import load_dotenv
-
-load_dotenv()
 
 class Config:
-    """Complete production configuration"""
-    
-    # === ENVIRONMENT ===
-    ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
-    DEBUG = False
-    PORT = int(os.getenv("PORT", 8000))
-    
-    # === CRITICAL: ONLY 2 API KEYS NEEDED ===
-    SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-    SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-    
-    # === BANKROLL MANAGEMENT ===
-    STARTING_BANKROLL = 0  # Will be set by user input
-    CURRENT_BANKROLL = 0  # Tracks current amount
-    PHASE_1_TARGET = 10_000_000  # 10M target
-    
-    # === 6-DAY CHALLENGE ===
-    CHALLENGE_DAYS = 6  # 6 straight wins target
-    CHALLENGE_MODE = True  # Track challenge progress
-    
-    # === BETTING RULES (PHASE 1 ONLY) ===
-    PHASE_1_BET_FRACTION = 0.50  # 50% per bet (UNTIL 10M)
-    
-    # === BOT MODE & DAY TRACKING (AUTOMATIC 24-HOUR SWITCH) ===
-    DEPLOYMENT_TIMESTAMP_FILE = "bot_deployment.log"  # Tracks EXACT deployment time
-    AUTO_SWITCH_AFTER_HOURS = 24  # Auto-switch from TEST to REAL after exactly 24 hours
-    
+    BOT_NAME = "BOT A - 15+ ODDS HUNTER"
+
+    # === SUPABASE (ONLY credentials needed) ===
+    SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+    SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+    # === ACCUMULATOR STRUCTURE ===
+    LEGS_PER_ACCA = 3
+    MIN_ODDS_PER_LEG = 2.0
+    TARGET_COMBINED_ODDS = 15.0   # what the bot is hunting for
+    MIN_COMBINED_ODDS = None      # no hard floor - best verified pick shown regardless
+    MAX_COMBINED_ODDS = None      # no cap - if it finds 18, 22+, still verify and use it
+
+    # === VERIFICATION (CONSTANT - same Day 1 and Day 2+, never switches) ===
+    MIN_VERIFICATION_SCORE = 90
+    MIN_PRICE_GAP_PERCENT = 0.05  # Melbet must be 5%+ better than other-book consensus to count
+
+    # === MARKET RULES ===
+    SLOPPY_MARKETS_ONLY = True
+    QUICK_FINISH_PREFERENCE = True
+    KICKOFF_WINDOW_HOURS = 2
+    MIN_MINUTES_BEFORE_KICKOFF = 15
+    ALLOW_CORRELATED_LEGS = False
+
+    # Only markets with a REAL free data source behind them. Nothing else is used -
+    # corners, cards, first-to-score, throw-ins etc. have no honest data source
+    # available, so they are never included, not guessed.
+    SUPPORTED_MARKET_TYPES = {
+        "match_winner":      "form + xG overperformance (fbref/ESPN/Liquipedia)",
+        "first_half_winner": "form + xG overperformance (quick-finish market)",
+        "handicap":          "form + xG overperformance (adjusted for handicap line)",
+        "over_under_goals":  "goals-per-match average (fbref)",
+        "map_winner":        "esports winrate + recent form (Liquipedia)",
+        "set_winner":        "H2H + player form (ESPN, tennis)",
+    }
+
+    # Other bookmakers scraped purely for price comparison (no account/API key needed,
+    # public odds pages only)
+    COMPARISON_BOOKMAKERS = ["bet9ja", "sportybet", "1xbet"]
+
+    # === STAKING ===
+    PHASE_1_BET_FRACTION = 0.50
+    STARTING_BANKROLL = 500.0
+    CURRENT_BANKROLL = 500.0
+
+    # === NO STREAK, NO COUNTDOWN, NO FIXED TARGET ===
+
+    # === DEPLOYMENT / TEST-MODE AUTO-SWITCH (unchanged mechanism) ===
+    DEPLOYMENT_TIMESTAMP_FILE = "bot_a_deployment.log"
+    TEST_MODE_DURATION_HOURS = 24  # Day 1 = test (same logic), Day 2+ = real, auto-switch
+
     @staticmethod
     def record_deployment_time():
-        """Record exact bot deployment timestamp on FIRST startup"""
         try:
             if not os.path.exists(Config.DEPLOYMENT_TIMESTAMP_FILE):
-                deployment_time = datetime.now()
-                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'w') as f:
-                    f.write(deployment_time.isoformat())
-                return deployment_time
-            else:
-                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'r') as f:
-                    return datetime.fromisoformat(f.read().strip())
-        except Exception as e:
+                t = datetime.now()
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, "w") as f:
+                    f.write(t.isoformat())
+                return t
+            with open(Config.DEPLOYMENT_TIMESTAMP_FILE, "r") as f:
+                return datetime.fromisoformat(f.read().strip())
+        except Exception:
             return datetime.now()
-    
+
     @staticmethod
     def is_test_mode_active():
-        """
-        AUTO-DETERMINE if TEST MODE should be active.
-        
-        LOGIC:
-        - First 24 hours after deployment = TEST MODE (no real bets)
-        - After 24 hours = REAL BETTING MODE (real bets)
-        - NO MANUAL INTERVENTION NEEDED
-        - FOOLPROOF: Can't forget to switch
-        """
         try:
-            # Get deployment time
             if os.path.exists(Config.DEPLOYMENT_TIMESTAMP_FILE):
-                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'r') as f:
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, "r") as f:
                     deployment_time = datetime.fromisoformat(f.read().strip())
             else:
-                # First run: Set deployment time
                 deployment_time = Config.record_deployment_time()
-            
-            # Calculate hours elapsed since deployment
-            now = datetime.now()
-            hours_elapsed = (now - deployment_time).total_seconds() / 3600
-            
-            # TEST MODE runs for exactly 24 hours
-            if hours_elapsed < 24:
-                hours_remaining = 24 - hours_elapsed
-                return True  # Still in TEST MODE
-            else:
-                # After 24 hours: AUTO-SWITCH to REAL BETTING
-                return False  # REAL BETTING MODE
-        
+            hours_elapsed = (datetime.now() - deployment_time).total_seconds() / 3600
+            return hours_elapsed < Config.TEST_MODE_DURATION_HOURS
         except Exception:
-            # Default to TEST MODE if any error
             return True
-    
+
     @staticmethod
     def get_mode_status():
-        """Get detailed mode status for logging"""
         try:
             if os.path.exists(Config.DEPLOYMENT_TIMESTAMP_FILE):
-                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, 'r') as f:
+                with open(Config.DEPLOYMENT_TIMESTAMP_FILE, "r") as f:
                     deployment_time = datetime.fromisoformat(f.read().strip())
-                
-                now = datetime.now()
-                hours_elapsed = (now - deployment_time).total_seconds() / 3600
-                
-                if hours_elapsed < 24:
-                    hours_remaining = 24 - hours_elapsed
-                    return {
-                        "mode": "TEST",
-                        "deployed": deployment_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "hours_elapsed": round(hours_elapsed, 1),
-                        "hours_remaining": round(hours_remaining, 1),
-                        "status": f"🧪 TEST MODE ({round(hours_remaining, 1)}h remaining)"
-                    }
-                else:
-                    return {
-                        "mode": "REAL",
-                        "deployed": deployment_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "hours_elapsed": round(hours_elapsed, 1),
-                        "hours_remaining": 0,
-                        "status": f"🔴 REAL BETTING ACTIVE ({round(hours_elapsed, 1)}h since deployment)"
-                    }
             else:
-                return {
-                    "mode": "TEST",
-                    "deployed": "Not yet",
-                    "hours_elapsed": 0,
-                    "hours_remaining": 24,
-                    "status": "🧪 TEST MODE (First run)"
-                }
+                deployment_time = Config.record_deployment_time()
+            hours_elapsed = (datetime.now() - deployment_time).total_seconds() / 3600
+            if hours_elapsed < Config.TEST_MODE_DURATION_HOURS:
+                remaining = Config.TEST_MODE_DURATION_HOURS - hours_elapsed
+                return {"mode": "TEST", "deployed": deployment_time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "hours_elapsed": round(hours_elapsed, 1), "hours_remaining": round(remaining, 1),
+                        "status": f"🧪 TEST MODE ({round(remaining,1)}h remaining) - same logic as real mode, no real bets"}
+            return {"mode": "REAL", "deployed": deployment_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "hours_elapsed": round(hours_elapsed, 1), "hours_remaining": 0,
+                    "status": f"🔴 REAL BETTING ACTIVE ({round(hours_elapsed,1)}h since deployment)"}
         except Exception:
-            return {
-                "mode": "TEST",
-                "status": "🧪 TEST MODE (Default)"
-            }
-    
-    # === ACCUMULATOR RULES (LOCKED) ===
-    MIN_LEGS_PER_ACCA = 3
-    MAX_LEGS_PER_ACCA = 3
-    MIN_COMBINED_ODDS = 15.0  # 15+ odds ONLY
-    MAX_COMBINED_ODDS = 150.0
-    
-    # === VERIFICATION RULES - AUTO-SWITCHES BASED ON MODE ===
-    # Day 1 (TEST MODE): 85+ (more accas for testing)
-    # Day 2+ (REAL MODE): 90+ (best accas only for real money)
-    
-    TEST_MODE_VERIFICATION = 85  # Looser during testing
-    REAL_MODE_VERIFICATION = 90  # Strict during real betting
-    
-    @staticmethod
-    def get_min_verification_score():
-        """
-        Get verification score threshold based on current mode.
-        
-        TEST MODE (Day 1): 85+ - More accas for testing
-        REAL MODE (Day 2+): 90+ - Only best accas for real money
-        """
-        is_test_mode = Config.is_test_mode_active()
-        
-        if is_test_mode:
-            return Config.TEST_MODE_VERIFICATION  # 85+
-        else:
-            return Config.REAL_MODE_VERIFICATION  # 90+
-    
-    @staticmethod
-    def get_verification_status():
-        """Show current verification threshold"""
-        is_test_mode = Config.is_test_mode_active()
-        score = Config.get_min_verification_score()
-        
-        if is_test_mode:
-            return f"🧪 TEST MODE: {score}+ verification (more accas for testing)"
-        else:
-            return f"🔴 REAL MODE: {score}+ verification (best accas only)"
-    
-    # === SLOPPY MARKETS ONLY ===
-    SLOPPY_MARKETS = [
-        "esports",
-        "championship",
-        "league_one",
-        "league_two",
-        "lower_leagues",
-        "tennis_props",
-        "cricket_overs",
-        "cricket_props",
-        "basketball_props",
-        "handball",
-        "volleyball",
-        "rugby_league",
-        "darts",
-        "snooker",
-        "table_tennis",
-        "badminton"
-    ]
-    
-    # === SHARP MARKETS TO REJECT ===
-    SHARP_MARKETS = [
-        "premier_league",
-        "la_liga",
-        "serie_a",
-        "bundesliga",
-        "champions_league",
-        "nba",
-        "nfl",
-        "mlb",
-        "top_10_tennis"
-    ]
-    
-    # === TIMING ===
-    ODDS_SCAN_INTERVAL = 600  # 10 minutes
-    DAILY_REPORT_TIME = "09:00"  # Show top acca at 9 AM
-    
-    # === LOGGING ===
-    LOG_FILE = "/tmp/bot_v1.log"
-    LOG_LEVEL = "INFO"
-    
-    # === BOT START TIME ===
-    BOT_START_TIME = None
-    
-    @staticmethod
-    def validate():
-        """Validate critical configuration"""
-        if not Config.SUPABASE_URL:
-            print("❌ FATAL: SUPABASE_URL missing")
-            return False
-        if not Config.SUPABASE_SERVICE_ROLE_KEY:
-            print("❌ FATAL: SUPABASE_SERVICE_ROLE_KEY missing")
-            return False
-        
-        print("✅ Config validated: Supabase credentials present")
-        return True
-    
-    @staticmethod
-    def set_starting_bankroll(amount):
-        """Set custom starting bankroll"""
-        if amount <= 0:
-            print(f"❌ Invalid bankroll: {amount}")
-            return False
-        
-        Config.STARTING_BANKROLL = amount
-        Config.CURRENT_BANKROLL = amount
-        print(f"✅ Starting bankroll set: ₦{amount:,.0f}")
-        return True
-    
-    @staticmethod
-    def update_current_bankroll(new_amount):
-        """Update current bankroll"""
-        Config.CURRENT_BANKROLL = new_amount
-        return Config.CURRENT_BANKROLL
-    
+            return {"mode": "TEST", "status": "🧪 TEST MODE (default)"}
+
     @staticmethod
     def get_recommended_bet_size():
-        """Calculate recommended stake (50% Phase 1)"""
-        return Config.CURRENT_BANKROLL * Config.PHASE_1_BET_FRACTION
-    
+        return round(Config.CURRENT_BANKROLL * Config.PHASE_1_BET_FRACTION, 2)
+
     @staticmethod
-    def is_phase_1_complete():
-        """Check if reached 10M"""
-        return Config.CURRENT_BANKROLL >= Config.PHASE_1_TARGET
+    def validate():
+        ok = True
+        if not Config.SUPABASE_URL:
+            print("❌ Missing SUPABASE_URL")
+            ok = False
+        if not Config.SUPABASE_SERVICE_ROLE_KEY:
+            print("❌ Missing SUPABASE_SERVICE_ROLE_KEY")
+            ok = False
+        if ok:
+            print("✅ Config validated: Supabase credentials present (no other API keys used)")
+        return ok
+
 
 config = Config()
