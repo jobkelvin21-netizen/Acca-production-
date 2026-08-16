@@ -4,6 +4,9 @@ config.py - BOT A: 15+ ODDS HUNTER (multi-platform price comparison + raw data)
 
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()  # Reads .env file and loads SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY into environment
 
 class Config:
     BOT_NAME = "BOT A - 15+ ODDS HUNTER"
