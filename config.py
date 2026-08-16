@@ -1,53 +1,71 @@
 """
-config.py - BOT A: 15+ ODDS HUNTER (multi-platform price comparison + raw data)
+config.py - BOT A: SportyBet direct scraping, odds-movement + probability strategy
+No API keys except Supabase. Direct scraping against confirmed real SportyBet
+endpoints (verified via live network inspection, not guessed).
 """
 
 import os
 from datetime import datetime
 from dotenv import load_dotenv
 
-load_dotenv()  # Reads .env file and loads SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY into environment
+load_dotenv()
 
 class Config:
-    BOT_NAME = "BOT A - 15+ ODDS HUNTER"
+    BOT_NAME = "BOT A - SPORTYBET ODDS-MOVEMENT HUNTER"
 
     # === SUPABASE (ONLY credentials needed) ===
     SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
     SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
+    # === SPORTYBET DIRECT ENDPOINTS (confirmed real via network inspection) ===
+    SPORTYBET_BASE = "https://www.sportybet.com/api/ng/factsCenter"
+    SPORTYBET_LIST_URL = f"{SPORTYBET_BASE}/pcUpcomingEvents"
+    SPORTYBET_EVENT_URL = f"{SPORTYBET_BASE}/event"
+
+    # Confirmed sport IDs (football verified live; others added as confirmed)
+    SPORT_IDS = {
+        "football": "sr:sport:1",
+    }
+
+    # Market IDs confirmed from real football list call
+    FOOTBALL_MARKET_IDS = "1,18,10,29,11,26,36,14,60100"
+
     # === ACCUMULATOR STRUCTURE ===
     LEGS_PER_ACCA = 3
     MIN_ODDS_PER_LEG = 2.0
-    TARGET_COMBINED_ODDS = 15.0   # what the bot is hunting for
-    MIN_COMBINED_ODDS = None      # no hard floor - best verified pick shown regardless
-    MAX_COMBINED_ODDS = None      # no cap - if it finds 18, 22+, still verify and use it
+    TARGET_COMBINED_ODDS = 15.0   # hoped-for target, not a hard floor
+    MAX_COMBINED_ODDS = None      # no cap - real verified picks above 15 still used
 
-    # === VERIFICATION (CONSTANT - same Day 1 and Day 2+, never switches) ===
+    # === VERIFICATION (CONSTANT - Day 1 = Day 2+, never switches) ===
     MIN_VERIFICATION_SCORE = 90
-    MIN_PRICE_GAP_PERCENT = 0.05  # Melbet must be 5%+ better than other-book consensus to count
+
+    # === ODDS-MOVEMENT SIGNAL (replaces invented probability formula) ===
+    MIN_CURRENT_PROBABILITY = 0.35     # leg's current SportyBet probability must be at least this
+    MIN_PROBABILITY_INCREASE = 0.05    # must have risen at least 5 percentage points since first snapshot
+    MIN_SNAPSHOT_GAP_HOURS = 3.0       # first and latest snapshot must be at least this far apart
+    POLL_INTERVAL_HOURS = 1.5          # how often the bot re-checks odds during the day
 
     # === MARKET RULES ===
-    SLOPPY_MARKETS_ONLY = True
-    QUICK_FINISH_PREFERENCE = True
-    KICKOFF_WINDOW_HOURS = 2
+    KICKOFF_WINDOW_HOURS = 2.0         # HARD RULE: all 3 legs must kick off within this window
     MIN_MINUTES_BEFORE_KICKOFF = 15
     ALLOW_CORRELATED_LEGS = False
 
-    # Only markets with a REAL free data source behind them. Nothing else is used -
-    # corners, cards, first-to-score, throw-ins etc. have no honest data source
-    # available, so they are never included, not guessed.
-    SUPPORTED_MARKET_TYPES = {
-        "match_winner":      "form + xG overperformance (fbref/ESPN/Liquipedia)",
-        "first_half_winner": "form + xG overperformance (quick-finish market)",
-        "handicap":          "form + xG overperformance (adjusted for handicap line)",
-        "over_under_goals":  "goals-per-match average (fbref)",
-        "map_winner":        "esports winrate + recent form (Liquipedia)",
-        "set_winner":        "H2H + player form (ESPN, tennis)",
+    # Only markets SportyBet actually attaches outcomes+probability to that we use.
+    # market_id values confirmed from real event detail response.
+    SUPPORTED_MARKET_IDS = {
+        "1": "1X2 (match winner)",
+        "18": "Over/Under Goals",
+        "10": "Double Chance",
+        "29": "Handicap",
+        "60100": "Both Teams To Score",
     }
 
-    # Other bookmakers scraped purely for price comparison (no account/API key needed,
-    # public odds pages only)
-    COMPARISON_BOOKMAKERS = ["bet9ja", "sportybet", "1xbet"]
+    # === SLOPPY MARKETS: exclude the most heavily-bet, most efficient leagues ===
+    EXCLUDED_LEAGUES = {
+        "premier league", "champions league", "la liga", "bundesliga",
+        "serie a", "ligue 1", "world cup", "euro", "european championship",
+        "uefa nations league", "copa america",
+    }
 
     # === STAKING ===
     PHASE_1_BET_FRACTION = 0.50
@@ -55,10 +73,11 @@ class Config:
     CURRENT_BANKROLL = 500.0
 
     # === NO STREAK, NO COUNTDOWN, NO FIXED TARGET ===
+    # 6 straight wins is the hope, spread over however long it takes.
 
     # === DEPLOYMENT / TEST-MODE AUTO-SWITCH (unchanged mechanism) ===
     DEPLOYMENT_TIMESTAMP_FILE = "bot_a_deployment.log"
-    TEST_MODE_DURATION_HOURS = 24  # Day 1 = test (same logic), Day 2+ = real, auto-switch
+    TEST_MODE_DURATION_HOURS = 24
 
     @staticmethod
     def record_deployment_time():

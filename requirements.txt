@@ -3,4 +3,3 @@ gunicorn
 supabase
 requests
 python-dotenv
-beautifulsoup4

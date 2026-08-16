@@ -1,12 +1,10 @@
 """
-analysis_engine.py - BOT A: 15+ ODDS HUNTER
-Strategy: multi-platform price comparison (Melbet vs other books) + raw real
-stats shown transparently (no invented probability formula). Builds 3-leg
-accas (each leg >=2.0 odds, no correlation, tight kickoff window, only
-market types with real data backing). Verifies (90+). Among everything
-verified, ranks by combined signal strength (price gap + real-data support),
-targets 15+ but shows the best verified pick regardless of exact number -
-no hard floor, no cap. Only #1 is ever surfaced.
+analysis_engine.py - BOT A
+Movement + probability edge signal (no invented formula - uses SportyBet's own
+probability field, compared against its earliest recorded snapshot for that
+outcome). Builds 3-leg accas with a HARD tight-kickoff-window rule. Verifies
+(90+, constant). Ranks verified candidates: prefers 15+ combined when
+available, otherwise strongest movement signal overall. Only #1 surfaced.
 """
 
 import logging
@@ -15,20 +13,65 @@ from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 from itertools import combinations
 from config import config
-from database import ComparisonOddsScraper
+import database as db
 
 logger = logging.getLogger("analysis_engine_a")
+
+
+class MovementChecker:
+    """Compares each leg's current probability against its earliest snapshot."""
+
+    @staticmethod
+    def check_leg(leg: Dict) -> Tuple[bool, float, str]:
+        """
+        Returns (passes, probability_increase, reasoning_text).
+        Records a new snapshot as a side effect, then compares against the
+        earliest one stored for this exact outcome.
+        """
+        event_id = leg["event_id"]
+        market_id = leg["market_id"]
+        outcome_id = leg["outcome_id"]
+        current_prob = leg["current_probability"]
+
+        # Record this reading
+        db.Database.save_snapshot(event_id, market_id, outcome_id, leg["odds"], current_prob)
+
+        earliest = db.Database.get_earliest_snapshot(event_id, market_id, outcome_id)
+        if not earliest:
+            return False, 0.0, "No snapshot history yet (first time seeing this outcome)"
+
+        try:
+            earliest_time = datetime.fromisoformat(earliest["snapshot_time"])
+            hours_gap = (datetime.now() - earliest_time).total_seconds() / 3600
+        except Exception:
+            return False, 0.0, "Snapshot timestamp error"
+
+        if hours_gap < config.MIN_SNAPSHOT_GAP_HOURS:
+            return False, 0.0, f"Only {hours_gap:.1f}h of history (need {config.MIN_SNAPSHOT_GAP_HOURS}h+)"
+
+        earliest_prob = earliest.get("probability", 0.0)
+        increase = current_prob - earliest_prob
+
+        if current_prob < config.MIN_CURRENT_PROBABILITY:
+            return False, increase, f"Current probability {current_prob:.1%} below minimum {config.MIN_CURRENT_PROBABILITY:.0%}"
+
+        if increase < config.MIN_PROBABILITY_INCREASE:
+            return False, increase, f"Probability moved {increase:+.1%} (need +{config.MIN_PROBABILITY_INCREASE:.0%} or more)"
+
+        reasoning = (f"{leg['selection']}: {earliest_prob:.1%} → {current_prob:.1%} "
+                     f"({increase:+.1%} over {hours_gap:.1f}h) | odds {leg['odds']}")
+        return True, increase, reasoning
 
 
 class AccumulatorBuilder:
 
     @staticmethod
     def _same_team_or_event(leg1: Dict, leg2: Dict) -> bool:
-        return leg1.get("team_id") == leg2.get("team_id") or \
-            (leg1.get("league") == leg2.get("league") and leg1.get("selection") == leg2.get("selection"))
+        return leg1.get("event_id") == leg2.get("event_id") or leg1.get("team_id") == leg2.get("team_id")
 
     @staticmethod
     def _within_kickoff_window(legs: List[Dict]) -> bool:
+        """HARD RULE: all legs in one acca must kick off within KICKOFF_WINDOW_HOURS of each other."""
         try:
             times = [datetime.fromisoformat(l["kickoff_time"]) for l in legs]
             spread_hours = (max(times) - min(times)).total_seconds() / 3600
@@ -37,19 +80,16 @@ class AccumulatorBuilder:
             return False
 
     @staticmethod
-    def build_candidates(all_legs: List[Dict]) -> List[Dict]:
-        legs = [l for l in all_legs if l.get("odds", 0) >= config.MIN_ODDS_PER_LEG]
-        if config.QUICK_FINISH_PREFERENCE:
-            quick = [l for l in legs if l.get("is_quick_finish")]
-            other = [l for l in legs if not l.get("is_quick_finish")]
-            legs = quick + other
-
+    def build_candidates(qualifying_legs: List[Dict]) -> List[Dict]:
+        """qualifying_legs = only legs that already passed the movement check."""
         candidates = []
-        for combo in combinations(legs[:25], config.LEGS_PER_ACCA):
+        for combo in combinations(qualifying_legs[:25], config.LEGS_PER_ACCA):
             if not config.ALLOW_CORRELATED_LEGS:
                 if any(AccumulatorBuilder._same_team_or_event(combo[i], combo[j])
                        for i in range(len(combo)) for j in range(i + 1, len(combo))):
                     continue
+
+            # HARD TIGHT-WINDOW CHECK - never skipped, never relaxed
             if not AccumulatorBuilder._within_kickoff_window(list(combo)):
                 continue
 
@@ -65,110 +105,99 @@ class AccumulatorBuilder:
             if len(candidates) >= 60:
                 break
 
-        logger.info(f"✅ Bot A built {len(candidates)} candidate accas ({config.MIN_ODDS_PER_LEG}+ per leg, target ~{config.TARGET_COMBINED_ODDS})")
+        logger.info(f"✅ Built {len(candidates)} candidate accas "
+                    f"(tight {config.KICKOFF_WINDOW_HOURS}h kickoff window enforced, "
+                    f"{config.MIN_ODDS_PER_LEG}+ per leg)")
         return candidates
 
 
 class Verifier:
-    """5-check verification, 90+ required, no partial credit.
-    Real edge = Melbet priced meaningfully better than other-book consensus
-    (price gap), combined with real supporting stats shown transparently."""
+    """5-check verification, 90+ required, no partial credit."""
 
     @staticmethod
-    def verify_all(candidates: List[Dict], real_data_lookup: Dict[str, Dict]) -> List[Dict]:
+    def verify_all(candidates: List[Dict]) -> List[Dict]:
         verified = []
         for acca in candidates:
-            score, signal_strength, reasoning = Verifier._verify_acca(acca, real_data_lookup)
+            score, reasoning = Verifier._verify_acca(acca)
             if score >= config.MIN_VERIFICATION_SCORE:
                 acca["verification_score"] = score
-                acca["signal_strength"] = round(signal_strength, 4)
                 acca["reasoning"] = reasoning
                 acca["recommended_stake"] = config.get_recommended_bet_size()
                 verified.append(acca)
-        logger.info(f"✅ Bot A verified {len(verified)} accas at {config.MIN_VERIFICATION_SCORE}+/100")
+        logger.info(f"✅ Verified {len(verified)} accas at {config.MIN_VERIFICATION_SCORE}+/100")
         return verified
 
     @staticmethod
-    def _verify_acca(acca: Dict, real_data_lookup: Dict[str, Dict]) -> Tuple[int, float, str]:
+    def _verify_acca(acca: Dict) -> Tuple[int, str]:
         score = 0
-        gaps = []
-        reasoning_parts = []
+        legs = acca["legs"]
 
-        # CHECK 1: Market exists / real kickoff time (20 pts) - hard fail if missing
-        if all(l.get("kickoff_time") for l in acca["legs"]):
+        # CHECK 1: Real kickoff time exists for every leg (20 pts) - hard fail if missing
+        if all(l.get("kickoff_time") for l in legs):
             score += 20
         else:
-            return 0, 0, ""
+            return 0, ""
 
-        # CHECK 2: Kickoff window respected (20 pts) - hard fail if not
-        if AccumulatorBuilder._within_kickoff_window(acca["legs"]):
-            score += 20
+        # CHECK 2: TIGHT kickoff window respected (25 pts) - hard fail if not, NEVER relaxed
+        if AccumulatorBuilder._within_kickoff_window(legs):
+            score += 25
         else:
-            return 0, 0, ""
+            return 0, ""
 
-        # CHECK 3: Melbet price meaningfully better than other-book consensus on every leg (30 pts)
-        all_gap_ok = True
-        for leg in acca["legs"]:
-            gap = ComparisonOddsScraper.get_price_gap(leg["odds"], leg.get("match_id", ""), leg.get("selection", ""))
-            if gap < config.MIN_PRICE_GAP_PERCENT:
-                all_gap_ok = False
-            gaps.append(gap)
-            real_data = real_data_lookup.get(leg.get("selection", ""), {})
-            summary = real_data.get("form_summary", "no data")
-            reasoning_parts.append(f"{leg.get('selection')}: {summary} | price {gap:+.1%} vs market")
-        if all_gap_ok:
+        # CHECK 3: Every leg already passed the movement+probability check (30 pts)
+        # (legs arriving here were pre-filtered by MovementChecker, but re-confirm)
+        if all(l.get("_movement_passed") for l in legs):
             score += 30
         else:
-            return 0, 0, ""
+            return 0, ""
 
         # CHECK 4: No correlated legs (15 pts) - hard fail if correlated
-        if not any(AccumulatorBuilder._same_team_or_event(acca["legs"][i], acca["legs"][j])
-                   for i in range(len(acca["legs"])) for j in range(i + 1, len(acca["legs"]))):
+        if not any(AccumulatorBuilder._same_team_or_event(legs[i], legs[j])
+                   for i in range(len(legs)) for j in range(i + 1, len(legs))):
             score += 15
         else:
-            return 0, 0, ""
+            return 0, ""
 
-        # CHECK 5: Every leg is a supported market type with real data backing (15 pts)
-        if all(l.get("market_type") in config.SUPPORTED_MARKET_TYPES for l in acca["legs"]):
-            score += 15
+        # CHECK 5: Every leg's per-leg odds floor respected (10 pts)
+        if all(l["odds"] >= config.MIN_ODDS_PER_LEG for l in legs):
+            score += 10
         else:
-            return 0, 0, ""
+            return 0, ""
 
-        signal_strength = sum(gaps) / len(gaps) if gaps else 0.0
-        reasoning = " || ".join(reasoning_parts)
-
-        return min(100, score), signal_strength, reasoning
+        reasoning = " || ".join(l.get("_movement_reasoning", "") for l in legs)
+        return min(100, score), reasoning
 
 
 class DailyPickSelector:
     """
-    BOT A RANKING RULE: among all verified candidates, pick the one with the
-    STRONGEST combined signal (average price-gap across all 3 legs vs other
-    bookmakers). Targets ~15+ combined odds, but no hard floor and no cap -
-    shows the best verified pick found that day regardless of exact number.
+    Among all verified candidates: prefer ones at/above the 15+ target;
+    among those, pick the strongest average movement signal. If nothing
+    reaches 15+, fall back to the strongest-signal verified pick overall.
     Only #1 is ever returned.
     """
 
     @staticmethod
     def get_best_pick(verified_accas: List[Dict]) -> Optional[Dict]:
         if not verified_accas:
-            logger.warning("❌ Bot A: no verified accas today - nothing shown, this is normal.")
+            logger.warning("❌ No verified accas today - nothing shown, this is normal.")
             return None
 
-        # Prefer picks near/above the 15+ target first, then fall back to strongest signal overall
+        def avg_movement(acca):
+            increases = [l.get("_movement_increase", 0) for l in acca["legs"]]
+            return sum(increases) / len(increases) if increases else 0
+
         near_target = [a for a in verified_accas if a["combined_odds"] >= config.TARGET_COMBINED_ODDS]
         pool = near_target if near_target else verified_accas
 
-        ranked = sorted(pool, key=lambda a: a.get("signal_strength", 0), reverse=True)
+        ranked = sorted(pool, key=avg_movement, reverse=True)
         best = ranked[0]
 
         logger.info(f"\n{'='*80}")
-        logger.info(f"🏆 BOT A - TODAY'S #1 PICK")
+        logger.info(f"🏆 TODAY'S #1 PICK")
         logger.info(f"{'='*80}")
         logger.info(f"ID: {best['id']}")
         logger.info(f"Combined Odds: {best['combined_odds']} (target was {config.TARGET_COMBINED_ODDS}+)")
         logger.info(f"Verification Score: {best['verification_score']}/100")
-        logger.info(f"Signal Strength (avg price gap vs market): {best['signal_strength']:+.1%}")
         logger.info(f"Reasoning: {best['reasoning']}")
         logger.info(f"Recommended Stake: ₦{best['recommended_stake']:,.0f}")
         logger.info(f"{'='*80}\n")
