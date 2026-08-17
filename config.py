@@ -40,10 +40,10 @@ class Config:
     MIN_VERIFICATION_SCORE = 90
 
     # === ODDS-MOVEMENT SIGNAL (replaces invented probability formula) ===
-    MIN_CURRENT_PROBABILITY = 0.45     # leg must be MORE LIKELY THAN NOT (tightened from 0.35)
-    MIN_PROBABILITY_INCREASE = 0.08    # must have risen at least 8 points (tightened from 0.05)
-    MIN_SNAPSHOT_GAP_HOURS = 4.0       # tightened from 3.0 - more time = more confidence
-    MIN_SNAPSHOT_COUNT = 3             # NEW: need at least 3 readings, not just first+last
+    MIN_CURRENT_PROBABILITY = 0.40     # loosened from 0.45 - real data showed 45% was too strict
+    MIN_PROBABILITY_INCREASE = 0.08    # kept tight - real sustained movement still required
+    MIN_SNAPSHOT_GAP_HOURS = 4.0       # kept tight - still need real time to pass
+    MIN_SNAPSHOT_COUNT = 3             # kept tight - still need 3+ readings, not just 2
     POLL_INTERVAL_HOURS = 1.5
 
     # === MARKET RULES ===

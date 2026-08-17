@@ -176,9 +176,10 @@ class Verifier:
 
         probs = [l.get("current_probability", 0) for l in legs]
         avg_prob = sum(probs) / len(probs) if probs else 0
-        # probability is scaled over a WIDER, harder-to-max range (35% floor to 75%)
-        # so it takes a genuinely strong number to earn most of these points
-        prob_ratio = min(1.0, max(0.0, (avg_prob - 0.35) / (0.75 - 0.35)))
+        # scaled from the REAL qualifying floor (config value) up to a strong 75% -
+        # references config directly so this can never drift out of sync with the
+        # actual filter threshold again
+        prob_ratio = min(1.0, max(0.0, (avg_prob - config.MIN_CURRENT_PROBABILITY) / (0.75 - config.MIN_CURRENT_PROBABILITY)))
         prob_points = 45 * prob_ratio  # PRIMARY signal - up to 45 pts
 
         increases = [l.get("_movement_increase", 0) for l in legs]
