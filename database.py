@@ -52,6 +52,20 @@ class Database:
             return False
 
     @staticmethod
+    def get_snapshot_history(event_id: str, market_id: str, outcome_id: str) -> List[Dict]:
+        """Get ALL recorded snapshots for this outcome, oldest first - used to
+        check the trend is genuinely consistent, not just one noisy spike."""
+        try:
+            dbc = Database.connect()
+            result = dbc.table("odds_snapshots_a").select("*").eq(
+                "event_id", event_id).eq("market_id", market_id).eq(
+                "outcome_id", outcome_id).order("snapshot_time", desc=False).execute()
+            return result.data if result.data else []
+        except Exception as e:
+            logger.warning(f"Get snapshot history failed: {e}")
+            return []
+
+    @staticmethod
     def get_earliest_snapshot(event_id: str, market_id: str, outcome_id: str) -> Optional[Dict]:
         """Get the first recorded snapshot for this outcome (for movement comparison)."""
         try:
@@ -66,12 +80,7 @@ class Database:
 
     @staticmethod
     def supersede_old_picks(new_pick_id: str) -> bool:
-        """
-        Marks any previously 'pending' picks as 'superseded' before a new
-        pick is saved, so the table never has more than one truly active
-        pending pick at a time - not just relying on dashboards to sort by
-        newest.
-        """
+        """Marks any previously 'pending' picks as 'superseded'."""
         try:
             dbc = Database.connect()
             dbc.table("verified_accumulators_a").update(
@@ -84,11 +93,55 @@ class Database:
             return False
 
     @staticmethod
-    def save_verified_accumulator(acca: Dict) -> bool:
-        """Saves the SINGLE #1 pick of the day. Confirmed by readback.
-        Also supersedes any older pending picks so only one is ever active."""
+    def get_todays_active_pick() -> Optional[Dict]:
+        """Get the current pending pick IF it was created today (same calendar date)."""
         try:
             dbc = Database.connect()
+            result = dbc.table("verified_accumulators_a").select("*").eq(
+                "status", "pending").order("created_at", desc=True).limit(1).execute()
+            if not result.data:
+                return None
+            pick = result.data[0]
+            created = datetime.fromisoformat(pick["created_at"])
+            if created.date() == datetime.now().date():
+                return pick
+            return None  # existing pending pick is from a previous day - treat as stale
+        except Exception as e:
+            logger.warning(f"Get today's active pick failed: {e}")
+            return None
+
+    @staticmethod
+    def save_verified_accumulator(acca: Dict) -> bool:
+        """
+        Saves a pick as a LOGGED candidate always. Only promotes it to the
+        visible 'pending' #1 pick if:
+          - there is no active pick yet today, OR
+          - this candidate genuinely scores higher than today's current pick
+        This keeps "only the best pick of the day" true, while still logging
+        every candidate found throughout the day for the outcome record.
+        """
+        try:
+            dbc = Database.connect()
+
+            # Always log this candidate for the historical record
+            try:
+                dbc.table("pick_log_a").insert({
+                    "accumulator_id": acca["id"], "reasoning": acca.get("reasoning"),
+                    "combined_odds": acca["combined_odds"],
+                    "verification_score": acca["verification_score"],
+                    "created_at": datetime.now().isoformat(),
+                }).execute()
+            except Exception as e:
+                logger.warning(f"Pick log write failed (non-critical): {e}")
+
+            todays_pick = Database.get_todays_active_pick()
+
+            if todays_pick and todays_pick.get("verification_score", 0) >= acca["verification_score"]:
+                logger.info(f"ℹ️ Candidate {acca['id']} (score {acca['verification_score']}) does NOT beat "
+                            f"today's current pick {todays_pick['id']} (score {todays_pick.get('verification_score')}). "
+                            f"Logged only, not shown as #1.")
+                return True  # not an error - just not promoted
+
             payload = {
                 "id": acca["id"],
                 "legs": acca["legs"],
@@ -106,20 +159,9 @@ class Database:
 
             confirm = dbc.table("verified_accumulators_a").select("id").eq("id", acca["id"]).execute()
             if confirm.data:
-                logger.info(f"✅ CONFIRMED IN SUPABASE: pick {acca['id']} saved and readable")
-
-                # Supersede any older pending picks now that the new one is confirmed saved
+                logger.info(f"✅ CONFIRMED IN SUPABASE: pick {acca['id']} PROMOTED to today's #1 "
+                            f"(score {acca['verification_score']})")
                 Database.supersede_old_picks(acca["id"])
-
-                try:
-                    dbc.table("pick_log_a").insert({
-                        "accumulator_id": acca["id"], "reasoning": acca.get("reasoning"),
-                        "combined_odds": acca["combined_odds"],
-                        "verification_score": acca["verification_score"],
-                        "created_at": datetime.now().isoformat(),
-                    }).execute()
-                except Exception as e:
-                    logger.warning(f"Pick log write failed (non-critical): {e}")
                 return True
             logger.error(f"❌ SUPABASE WRITE UNVERIFIED - row {acca['id']} not found on readback")
             return False

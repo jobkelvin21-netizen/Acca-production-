@@ -19,26 +19,29 @@ logger = logging.getLogger("analysis_engine_a")
 
 
 class MovementChecker:
-    """Compares each leg's current probability against its earliest snapshot."""
+    """
+    Compares each leg's current probability against its recorded history.
+    TIGHTENED: requires at least MIN_SNAPSHOT_COUNT readings, and requires the
+    trend to be broadly CONSISTENT (not just a single noisy spike that nets
+    positive between two points) - a real sustained rise, checked across
+    every consecutive pair of readings, not just start vs end.
+    """
 
     @staticmethod
     def check_leg(leg: Dict) -> Tuple[bool, float, str]:
-        """
-        Returns (passes, probability_increase, reasoning_text).
-        Records a new snapshot as a side effect, then compares against the
-        earliest one stored for this exact outcome.
-        """
         event_id = leg["event_id"]
         market_id = leg["market_id"]
         outcome_id = leg["outcome_id"]
         current_prob = leg["current_probability"]
 
-        # Record this reading
         db.Database.save_snapshot(event_id, market_id, outcome_id, leg["odds"], current_prob)
 
-        earliest = db.Database.get_earliest_snapshot(event_id, market_id, outcome_id)
-        if not earliest:
-            return False, 0.0, "No snapshot history yet (first time seeing this outcome)"
+        history = db.Database.get_snapshot_history(event_id, market_id, outcome_id)
+        if len(history) < config.MIN_SNAPSHOT_COUNT:
+            return False, 0.0, f"Only {len(history)} reading(s) so far (need {config.MIN_SNAPSHOT_COUNT}+ for a reliable trend)"
+
+        earliest = history[0]
+        latest = history[-1]
 
         try:
             earliest_time = datetime.fromisoformat(earliest["snapshot_time"])
@@ -52,14 +55,25 @@ class MovementChecker:
         earliest_prob = earliest.get("probability", 0.0)
         increase = current_prob - earliest_prob
 
+        # CONSISTENCY CHECK: require the trend to be broadly non-decreasing across
+        # readings, not a single spike. Allow small noise (up to 2 points dip
+        # between any two consecutive readings) but reject anything that swings
+        # wildly - that's noise, not a real sustained trend.
+        for i in range(1, len(history)):
+            step_change = history[i]["probability"] - history[i - 1]["probability"]
+            if step_change < -0.02:
+                return False, increase, (f"Inconsistent trend - probability dropped "
+                                          f"{abs(step_change):.1%} between two readings "
+                                          f"(real movement should be broadly steady, not spiky)")
+
         if current_prob < config.MIN_CURRENT_PROBABILITY:
-            return False, increase, f"Current probability {current_prob:.1%} below minimum {config.MIN_CURRENT_PROBABILITY:.0%}"
+            return False, increase, f"Current probability {current_prob:.1%} below minimum {config.MIN_CURRENT_PROBABILITY:.0%} (must be more likely than not)"
 
         if increase < config.MIN_PROBABILITY_INCREASE:
             return False, increase, f"Probability moved {increase:+.1%} (need +{config.MIN_PROBABILITY_INCREASE:.0%} or more)"
 
         reasoning = (f"{leg['selection']}: {earliest_prob:.1%} → {current_prob:.1%} "
-                     f"({increase:+.1%} over {hours_gap:.1f}h) | odds {leg['odds']}")
+                     f"({increase:+.1%} over {hours_gap:.1f}h, {len(history)} consistent readings) | odds {leg['odds']}")
         return True, increase, reasoning
 
 
@@ -129,43 +143,68 @@ class Verifier:
 
     @staticmethod
     def _verify_acca(acca: Dict) -> Tuple[int, str]:
-        score = 0
+        """
+        Graduated scoring: each check contributes a RANGE of points based on
+        HOW STRONGLY it passes, not just pass/fail. A pick can genuinely score
+        90, 94, or 100 depending on real signal strength - not just 0 or 100.
+        Still hard-fails (returns 0) on the non-negotiable structural rules
+        (kickoff window, correlation, market support) since those aren't
+        "strength" questions - they're yes/no rules.
+        """
         legs = acca["legs"]
 
-        # CHECK 1: Real kickoff time exists for every leg (20 pts) - hard fail if missing
-        if all(l.get("kickoff_time") for l in legs):
-            score += 20
-        else:
+        # HARD STRUCTURAL RULES - fail completely, no partial credit here.
+        # These are not "how strong" questions, they're "is this even valid" questions.
+        if not all(l.get("kickoff_time") for l in legs):
+            return 0, ""
+        if not AccumulatorBuilder._within_kickoff_window(legs):
+            return 0, ""
+        if any(AccumulatorBuilder._same_team_or_event(legs[i], legs[j])
+               for i in range(len(legs)) for j in range(i + 1, len(legs))):
+            return 0, ""
+        if not all(l["odds"] >= config.MIN_ODDS_PER_LEG for l in legs):
+            return 0, ""
+        if not all(l.get("_movement_passed") for l in legs):
             return 0, ""
 
-        # CHECK 2: TIGHT kickoff window respected (25 pts) - hard fail if not, NEVER relaxed
-        if AccumulatorBuilder._within_kickoff_window(legs):
-            score += 25
-        else:
-            return 0, ""
+        # GRADUATED SCORING - SportyBet's own probability is the TRUE primary
+        # signal. Movement can only ADD to a genuinely decent probability, it
+        # can never compensate for a weak one - this is deliberate, not
+        # additive, so a big movement on a weak pick can't outscore a strong
+        # probability with modest movement.
+        score = 30  # base score once all structural rules pass
 
-        # CHECK 3: Every leg already passed the movement+probability check (30 pts)
-        # (legs arriving here were pre-filtered by MovementChecker, but re-confirm)
-        if all(l.get("_movement_passed") for l in legs):
-            score += 30
-        else:
-            return 0, ""
+        probs = [l.get("current_probability", 0) for l in legs]
+        avg_prob = sum(probs) / len(probs) if probs else 0
+        # probability is scaled over a WIDER, harder-to-max range (35% floor to 75%)
+        # so it takes a genuinely strong number to earn most of these points
+        prob_ratio = min(1.0, max(0.0, (avg_prob - 0.35) / (0.75 - 0.35)))
+        prob_points = 45 * prob_ratio  # PRIMARY signal - up to 45 pts
 
-        # CHECK 4: No correlated legs (15 pts) - hard fail if correlated
-        if not any(AccumulatorBuilder._same_team_or_event(legs[i], legs[j])
-                   for i in range(len(legs)) for j in range(i + 1, len(legs))):
-            score += 15
-        else:
-            return 0, ""
+        increases = [l.get("_movement_increase", 0) for l in legs]
+        avg_increase = sum(increases) / len(increases) if increases else 0
+        movement_ratio = min(1.0, avg_increase / 0.20) if avg_increase > 0 else 0
+        # movement bonus is SCALED BY probability strength too - a huge movement
+        # on a weak-probability pick earns little, because movement_ratio alone
+        # isn't enough; it needs decent probability underneath it as well
+        movement_points = 20 * movement_ratio * max(0.3, prob_ratio)
 
-        # CHECK 5: Every leg's per-leg odds floor respected (10 pts)
-        if all(l["odds"] >= config.MIN_ODDS_PER_LEG for l in legs):
-            score += 10
-        else:
-            return 0, ""
+        score += round(prob_points)
+        score += round(movement_points)
+
+        # Kickoff tightness (up to 5 pts) - minor safety consideration only
+        try:
+            times = [datetime.fromisoformat(l["kickoff_time"]) for l in legs]
+            spread_hours = (max(times) - min(times)).total_seconds() / 3600
+            tightness_ratio = 1 - (spread_hours / config.KICKOFF_WINDOW_HOURS)
+            score += round(5 * max(0, tightness_ratio))
+        except Exception:
+            pass
+
+        score = min(100, max(0, score))
 
         reasoning = " || ".join(l.get("_movement_reasoning", "") for l in legs)
-        return min(100, score), reasoning
+        return score, reasoning
 
 
 class DailyPickSelector:
